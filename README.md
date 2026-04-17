@@ -40,21 +40,26 @@ uv pip install stable-worldmodel[train,env]
 
 Datasets use the HDF5 format for fast loading. Download the data from [HuggingFace](https://huggingface.co/collections/quentinll/lewm) and decompress with:
 
+Linux:
 ```bash
-brew install git-xet && git xet install
+sudo apt update
+sudo apt install git-lfs
+git lfs install
 ```
 
+Mac:
 ```bash
+brew install git-xet && git xet install
 git xet install
 git lfs install
 ```
 
 ```bash
 git clone git@hf.co:datasets/quentinll/lewm-tworooms
-```
-
-```bash
+cd lewm-tworooms
 git remote set-url origin https://<user>:<token>@huggingface.co/datasets/quentinll/lewm-tworooms
+git restore --staged .
+git restore .
 ```
 
 ```bash

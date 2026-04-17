@@ -228,4 +228,4 @@ src/.DS_Store
 #predictions/*.txt
 
 wandb/*
-
+stable-wm
