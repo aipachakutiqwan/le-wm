@@ -232,3 +232,6 @@ stable-wm
 
 # Output models, to be evaluated then
 outputs/
+
+environment.json
+requirements_frozen.txt

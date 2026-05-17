@@ -34,6 +34,7 @@ This codebase builds on [stable-worldmodel](https://github.com/galilai-group/sta
 uv venv --python=3.10
 source .venv/bin/activate
 uv pip install stable-worldmodel[train,env]
+uv pip install -r pyproject.toml --group dev
 ```
 
 ## Data
