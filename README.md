@@ -31,10 +31,19 @@ This codebase builds on [stable-worldmodel](https://github.com/galilai-group/sta
 
 **Installation:**
 ```bash
-uv venv --python=3.10
+uv venv --python=3.12
 source .venv/bin/activate
 uv pip install stable-worldmodel[train,env]
 uv pip install -r pyproject.toml --group dev
+```
+
+**Env variables**
+```bash
+export HF_TOKEN=""
+export STABLEWM_HOME="/var/cs231n/stable-wm/lewm-tworooms/"
+export HYDRA_FULL_ERROR=1
+export CUDA_LAUNCH_BLOCKING=1
+
 ```
 
 ## Data

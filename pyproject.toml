@@ -11,9 +11,10 @@ dependencies = [
     "scikit-learn>=1.7.2",
     "stable-pretraining>=0.1.6",
     "stable-worldmodel[env,train]",
-    "torch>=2.11.0",
-    "torchvision>=0.26.0",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
     "wandb>=0.27.0",
+    "wheel>=0.47.0",
 ]
 
 readme = "README.md"
@@ -55,14 +56,13 @@ distribution = false
 
 [tool.uv.sources]
 deepsnap = { git = "https://github.com/snap-stanford/deepsnap.git" }
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
-
 
 [dependency-groups]
 dev = [
