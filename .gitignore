@@ -229,3 +229,6 @@ src/.DS_Store
 
 wandb/*
 stable-wm
+
+# Output models, to be evaluated then
+outputs/
