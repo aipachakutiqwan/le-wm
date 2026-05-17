@@ -235,3 +235,6 @@ outputs/
 
 environment.json
 requirements_frozen.txt
+
+# model checkpoints
+lewm/
