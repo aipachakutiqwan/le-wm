@@ -5,6 +5,7 @@ from pathlib import Path
 import hydra
 import lightning as pl
 import stable_pretraining as spt
+from stable_pretraining.optim.lr_scheduler import LinearWarmupCosineAnnealingLR
 import stable_worldmodel as swm
 import torch
 from lightning.pytorch.loggers import WandbLogger
@@ -127,7 +128,11 @@ def run(cfg):
         'model_opt': {
             "modules": 'model',
             "optimizer": dict(cfg.optimizer),
-            "scheduler": {"type": "LinearWarmupCosineAnnealingLR"},
+            "scheduler": lambda opt, mod: LinearWarmupCosineAnnealingLR(
+                opt,
+                warmup_steps=max(1, int(0.01 * mod.trainer.estimated_stepping_batches)),
+                max_steps=mod.trainer.estimated_stepping_batches,
+            ),
             "interval": "epoch",
         },
     }
