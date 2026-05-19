@@ -11,4 +11,7 @@ loader:
   prefetch_factor: 3
 
 wandb:
-  enabled: False
+  enabled: True
+  config:
+    entity: addyj-stanford-university
+    project: le-wm-test

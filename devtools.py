@@ -130,11 +130,15 @@ class DevTools:
             flags += ["-e", f"WANDB_API_KEY={wandb_key}"]
         return flags
 
-    def run_local(self, tag: str, data: str = "tworoom", setup: str = None) -> None:
+    def run_local(self, tag: str, data: str = "tworoom", setup: str = None, overrides: list = None) -> None:
         """Run training locally inside the Docker container."""
         cmd = ["docker", "run"] + self._base_run_flags() + [f"{IMAGE_NAME}:{tag}", f"data={data}"]
         if setup:
             cmd += [f"setup={setup}"]
+        if overrides:
+            if isinstance(overrides, str):
+                overrides = overrides.strip("[]").split(",")
+            cmd += overrides
         self._run(cmd)
 
     def dev(self, tag: str) -> None:

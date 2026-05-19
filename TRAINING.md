@@ -10,7 +10,7 @@ No venv needed. All dependencies run inside the container. Only requirements on 
 - `git` — for auto-tagging
 
 ```bash
-export STABLEWM_HOME=/mnt/hdd/CS231N/stablewm-home
+export STABLEWM_HOME=<PATH_TO_stablewm-home>
 export GITHUB_USERNAME=<your-github-username>
 export GITHUB_PAT=<your-pat>
 export WANDB_API_KEY=<your-key>   # optional, for W&B logging
@@ -21,10 +21,10 @@ export WANDB_API_KEY=<your-key>   # optional, for W&B logging
 Only needed if running `train.py` directly outside Docker:
 
 ```bash
-cd /mnt/hdd/CS231N/le-wm
-/home/adsuji/.local/bin/uv sync --python /home/adsuji/venv_cs231n/bin/python
+cd <PATH_TO_le-wm_repo>
+uv sync --python <PATH_TO_PYTHON>
 source .venv/bin/activate
-export STABLEWM_HOME=/mnt/hdd/CS231N/stablewm-home
+export STABLEWM_HOME=<PATH_TO_stablewm-home>
 ```
 
 ---
@@ -37,8 +37,8 @@ Priority: **CLI overrides > setup yaml > lewm.yaml**.
 | Setup | File | GPU | batch | precision | wandb |
 |---|---|---|---|---|---|
 | _(none)_ | `lewm.yaml` | any | 128 | bf16 | on |
-| `setup=local_rtx2080` | `config/train/setup/local_rtx2080.yaml` | RTX 2080 Ti (11 GB) | 64 | 16-mixed | off |
-| `setup=cloud_a10g` | `config/train/setup/cloud_a10g.yaml` | A10G (24 GB) | 256 | bf16-mixed | on |
+| `setup=local_rtx2080` | `config/train/setup/local_rtx2080.yaml` | RTX 2080 Ti (11 GB) | 64 | 16-mixed | on |
+| `setup=cloud_a10g` | `config/train/setup/cloud_a10g.yaml` | A10G (24 GB) | 256 | bf16 | on |
 
 ### Dataset configs
 
@@ -67,14 +67,52 @@ python train.py setup=local_rtx2080 data=pusht trainer.max_epochs=50
 python train.py setup=cloud_a10g data=tworoom loader.batch_size=512 wandb.enabled=False
 ```
 
-Checkpoints are saved to `$STABLEWM_HOME/<run_id>/` after each epoch.
+Checkpoints are saved to `$STABLEWM_HOME/<run_id>/` after each epoch:
+
+| File | Purpose |
+|---|---|
+| `lewm_epoch_N_object.ckpt` | Model weights pickle per epoch (inference) |
+| `lewm_weights.ckpt` | Full training state for resuming (overwritten each epoch) |
+
 The resolved config is printed at startup — check `trainer.precision` and `loader.batch_size` to confirm the right setup is active.
+
+### Quick testing
+
+`limit_train_batches` behaves differently by type — **int = number of batches, float = fraction**:
+
+```bash
+# 10 batches per epoch (int)
+python train.py trainer.limit_train_batches=10 trainer.limit_val_batches=5
+
+# 1 batch per epoch (int) — minimal smoke test
+python train.py trainer.fast_dev_run=True
+
+# use a fresh subdir to avoid checkpoint epoch mismatch when testing
+python train.py subdir=test trainer.limit_train_batches=10 trainer.max_epochs=1
+```
+
+> `limit_train_batches=1` (int) = 1 batch. `limit_train_batches=1.0` (float) = 100% of batches.
+> Reference: https://lightning.ai/docs/pytorch/stable/common/trainer.html#limit-train-batches
+
+### W&B checkpoint artifacts
+
+Set `wandb.config.log_model` to upload checkpoints as named artifacts:
+
+```bash
+# upload best checkpoint only (artifact name includes epoch)
+python train.py wandb.config.log_model=True
+
+# upload all epoch checkpoints
+python train.py wandb.config.log_model=all
+```
+
+Find artifacts at: `https://wandb.ai/<entity>/<project>/artifacts/model`
 
 ---
 
 ## 4. Docker
 
-All Docker operations go through `devtools.py`. Image name is fixed as `cs231n_project/lewm`.
+All Docker operations go through `./devtools.py`. Image name is fixed as `cs231n_project/lewm`.
 
 ### Image tagging
 
@@ -121,6 +159,9 @@ python3 train.py data=pusht setup=local_rtx2080
 ./devtools.py run_local test
 ./devtools.py run_local test --data pusht
 ./devtools.py run_local test --data pusht --setup local_rtx2080
+
+# pass extra Hydra overrides
+./devtools.py run_local test --data pusht --overrides "[trainer.limit_train_batches=10,trainer.max_epochs=1,subdir=test]"
 ```
 
 ### Push to GHCR
@@ -164,5 +205,5 @@ The image is pulled from `ghcr.io/<image-owner-username>/lewm:<tag>` and automat
 | `login` | Log in to GHCR using `GITHUB_PAT` and `GITHUB_USERNAME` env vars |
 | `push_docker <tag>` | Tag and push image to GHCR |
 | `pull_docker <tag>` | Pull image from GHCR and retag locally |
-| `run_local <tag> [--data] [--setup]` | Run training in baked image |
+| `run_local <tag> [--data] [--setup] [--overrides]` | Run training in baked image |
 | `dev <tag>` | Interactive shell with live repo mount |
