@@ -137,6 +137,11 @@ class DevTools:
         ]
         if wandb_key := os.environ.get("WANDB_API_KEY"):
             flags += ["-e", f"WANDB_API_KEY={wandb_key}"]
+        # Reduces CUDA memory fragmentation: reserved-but-unallocated blocks can
+        # be reused for non-contiguous allocations instead of triggering OOM.
+        # Hit this on L4 (22 GiB usable) during ViT MLP forward at batch_size=256.
+        # https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf
+        # flags += ["-e", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"]
         return flags
 
     def run_local(self, tag: str, data: str = "tworoom", setup: str = None, overrides: list = None) -> None:
