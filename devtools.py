@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).parent
 BASE_IMAGE = "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04"
 IMAGE_NAME = "cs231n_project/lewm"  # fixed local name — only tag should change between runs
 IMAGE_TAG = "latest"
+GHCR_IMAGE_OWNER = "jadhavan"  # default GHCR namespace — override with GHCR_IMAGE_OWNER env var
 
 
 class DevTools:
@@ -76,8 +77,8 @@ class DevTools:
         log.info("Built: %s:%s in %dm %ds", IMAGE_NAME, tag, elapsed // 60, elapsed % 60)
 
         if push:
-            self.login(username, registry)
-            self.push_docker(tag, username, registry)
+            self.login(username=username, registry=registry)
+            self.push_docker(tag=tag, username=username, registry=registry)
 
     def _github_username(self, username: str = None) -> str:
         resolved = username or os.environ.get("GITHUB_USERNAME")
@@ -97,20 +98,28 @@ class DevTools:
         )
         log.info("Logged in to %s as %s", registry, username)
 
-    def push_docker(self, tag: str, username: str = None, registry: str = "ghcr.io") -> None:
-        """Tag the local image and push it to the registry."""
+    def push_docker(self, tag: str, username: str = None, owner: str = None, registry: str = "ghcr.io") -> None:
+        """Tag the local image and push it to the registry.
+        username: your GitHub username for auth (GITHUB_USERNAME env var)
+        owner:    GitHub username to push under (GHCR_IMAGE_OWNER env var) — defaults to username
+        """
         username = self._github_username(username)
-        image_name = IMAGE_NAME.split("/")[-1]  # strip local namespace, use just "lewm"
-        remote = f"{registry}/{username}/{image_name}:{tag}"
+        image_owner = owner or os.environ.get("GHCR_IMAGE_OWNER") or GHCR_IMAGE_OWNER
+        image_name = IMAGE_NAME.split("/")[-1]
+        remote = f"{registry}/{image_owner}/{image_name}:{tag}"
         self._run(["docker", "tag", f"{IMAGE_NAME}:{tag}", remote])
         self._run(["docker", "push", remote])
         log.info("Pushed: %s", remote)
 
-    def pull_docker(self, tag: str, username: str = None, registry: str = "ghcr.io") -> None:
-        """Pull the training image from the registry and retag it locally."""
+    def pull_docker(self, tag: str, username: str = None, owner: str = None, registry: str = "ghcr.io") -> None:
+        """Pull the training image from the registry and retag it locally.
+        username: your GitHub username for auth (GITHUB_USERNAME env var)
+        owner:    GitHub username who pushed the image (GHCR_IMAGE_OWNER env var) — defaults to username
+        """
         username = self._github_username(username)
+        image_owner = owner or os.environ.get("GHCR_IMAGE_OWNER") or GHCR_IMAGE_OWNER
         image_name = IMAGE_NAME.split("/")[-1]
-        remote = f"{registry}/{username}/{image_name}:{tag}"
+        remote = f"{registry}/{image_owner}/{image_name}:{tag}"
         self._run(["docker", "pull", remote])
         self._run(["docker", "tag", remote, f"{IMAGE_NAME}:{tag}"])
         log.info("Pulled and tagged as %s:%s", IMAGE_NAME, tag)
