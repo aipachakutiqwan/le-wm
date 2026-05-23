@@ -1,0 +1,12 @@
+# @package _global_
+# Single-process data loading for CPU runs.
+# num_workers=0 avoids spawning worker processes, which can't pickle the
+# norm_fn closure produced by get_column_normalizer.
+
+device: cpu
+
+loader:
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  prefetch_factor: null   # only valid when num_workers > 0
