@@ -229,3 +229,13 @@ src/.DS_Store
 
 wandb/*
 stable-wm
+
+# environment snapshots and frozen deps
+environment*.json
+requirements_frozen*.txt
+
+# hydra ouputs
+outputs/
+
+# uv lock since we have different local setups
+uv.lock
