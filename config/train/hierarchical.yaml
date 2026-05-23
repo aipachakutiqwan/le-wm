@@ -17,7 +17,7 @@ encoder_scale: tiny
 
 train_split: 0.9
 
-device: cpu  # override with device=cuda when a GPU is available
+device: gpu 
 
 loader:
   batch_size: 64

@@ -76,15 +76,10 @@ def run(cfg):
     ##       model              ##
     ##############################
 
-    # Ensure dataset path is correctly set for CPU-only environments
-    # The stable_worldmodel library looks for datasets in $STABLEWM_HOME/<name>.h5
-    # Our datasets are stored in the le-wm-datasets repository, so we point the env var there.
-    os.environ.setdefault('STABLEWM_HOME', str(Path('..', 'le-wm-datasets', 'lewm-tworooms')))
     py_log.info("STABLEWM_HOME set to %s", os.getenv('STABLEWM_HOME'))
 
     py_log.info("Loading stage-1 checkpoint from %s", cfg.stage1_checkpoint)
-    # Load checkpoint on CPU to avoid CUDA device errors when GPU is unavailable
-    jepa = torch.load(cfg.stage1_checkpoint, map_location='cpu', weights_only=False)
+    jepa = torch.load(cfg.stage1_checkpoint, map_location=cfg.device, weights_only=False)
     jepa.eval()
 
     effective_act_dim = cfg.data.dataset.frameskip * cfg.wm.action_dim
