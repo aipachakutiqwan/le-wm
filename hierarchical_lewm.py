@@ -384,6 +384,7 @@ def train_hierarchical_lewm(
     n_epochs: int = 10,
     device: str = "cuda",
     freeze_encoder: bool = True,
+    wandb_run=None,
 ) -> HierarchicalLeWM:
     """Jointly optimise A_ψ and P^(2) on L_tf (stage 2).
 
@@ -432,9 +433,9 @@ def train_hierarchical_lewm(
             optimizer.step()
             epoch_loss += out["loss"].item()
 
-        print(
-            f"epoch {epoch + 1}/{n_epochs}  stage-2 L_tf: "
-            f"{epoch_loss / len(dataloader):.5f}"
-        )
+        avg_loss = epoch_loss / len(dataloader)
+        print(f"epoch {epoch + 1}/{n_epochs}  stage-2 L_tf: {avg_loss:.5f}")
+        if wandb_run is not None:
+            wandb_run.log({"stage2/loss": avg_loss}, step=epoch + 1)
 
     return model

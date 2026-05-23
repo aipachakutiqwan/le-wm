@@ -25,6 +25,7 @@ from pathlib import Path
 py_log = logging.getLogger(__name__)
 
 import hydra
+import wandb
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
@@ -117,6 +118,11 @@ def run(cfg):
     device = cfg.device
     py_log.info("Run directory: %s  device: %s", run_dir, device)
 
+    wandb_run = None
+    if cfg.wandb.enabled:
+        wandb_run = wandb.init(**OmegaConf.to_container(cfg.wandb.config, resolve=True))
+        wandb_run.config.update(OmegaConf.to_container(cfg, resolve=True))
+
     model = train_hierarchical_lewm(
         model=model,
         dataloader=dataloader,
@@ -125,11 +131,15 @@ def run(cfg):
         n_epochs=cfg.stage2.n_epochs,
         device=device,
         freeze_encoder=cfg.stage2.freeze_encoder,
+        wandb_run=wandb_run,
     )
 
     out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
     torch.save(model, out_path)
     py_log.info("Saved hierarchical model to %s", out_path)
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

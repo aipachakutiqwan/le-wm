@@ -53,11 +53,10 @@ wm:
 stage2_num_steps: 20
 
 wandb:
-  enabled: False
+  enabled: True
   config:
     entity: lewm
     project: lewm
     name: ${output_model_name}
     id: ${subdir}
     resume: allow
-    log_model: False
