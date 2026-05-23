@@ -17,7 +17,7 @@ encoder_scale: tiny
 
 train_split: 0.9
 
-device: gpu 
+device: cuda 
 
 loader:
   batch_size: 64
