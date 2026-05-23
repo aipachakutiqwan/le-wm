@@ -239,3 +239,9 @@ outputs/
 
 # uv lock since we have different local setups
 uv.lock
+
+# model checkpoints
+lewm/
+
+
+
