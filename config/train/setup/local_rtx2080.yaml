@@ -1,0 +1,17 @@
+# @package _global_
+# Tuned for RTX 2080 Ti (11 GB VRAM)
+
+trainer:
+  max_epochs: 10
+  precision: 16-mixed   # fp16 — native on Turing, bf16 is not
+
+loader:
+  batch_size: 64
+  num_workers: 6
+  prefetch_factor: 3
+
+wandb:
+  enabled: True
+  config:
+    entity: addyj-stanford-university
+    project: le-wm-test

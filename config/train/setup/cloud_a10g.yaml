@@ -1,0 +1,10 @@
+# @package _global_
+# Tuned for L4 / A10G (22-24 GB VRAM) — Modal / AWS / GCP
+
+loader:
+  batch_size: 192
+  num_workers: 8
+  prefetch_factor: 2
+
+wandb:
+  enabled: True

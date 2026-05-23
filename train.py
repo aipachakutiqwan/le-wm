@@ -1,6 +1,9 @@
+import logging
 import os
 from functools import partial
 from pathlib import Path
+
+py_log = logging.getLogger(__name__)
 
 import hydra
 import lightning as pl
@@ -47,6 +50,8 @@ def lejepa_forward(self, batch, stage, cfg):
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="lewm")
 def run(cfg):
+    py_log.info("Starting training — data=%s setup=%s wandb=%s", cfg.data.dataset.name, cfg.get("setup", "default"), cfg.wandb.enabled)
+
     #########################
     ##       dataset       ##
     #########################
@@ -147,6 +152,8 @@ def run(cfg):
     run_id = cfg.get("subdir") or ""
     run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
 
+    py_log.info("Run Directory: %s", run_dir)
+
     logger = None
     if cfg.wandb.enabled:
         logger = WandbLogger(**cfg.wandb.config)
@@ -176,6 +183,7 @@ def run(cfg):
     )
 
     manager()
+    py_log.info("Training complete — checkpoints saved to %s", run_dir)
     return
 
 

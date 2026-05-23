@@ -1,9 +1,12 @@
 defaults:
   - _self_
   - data: pusht
+  - setup: null #default: skip reading file
 
 output_model_name: lewm
-subdir: ${hydra:job.id}
+# hydra is probably for SLURM launcher which we will not use.
+# subdir: ${hydra:job.id}
+subdir: ${now:%Y%m%d_%H%M%S}
 
 num_workers: 6
 train_split: 0.9
@@ -19,6 +22,9 @@ trainer:
   accelerator: gpu
   precision: bf16
   gradient_clip_val: 1.0
+  # Refer: https://lightning.ai/docs/pytorch/stable/common/trainer.html#limit-train-batches
+  limit_train_batches: 1.0   # set to int (e.g. 10) to cap batches per epoch for quick tests
+  limit_val_batches: 1.0
 
 loader:
   batch_size: 128
