@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).parent
 BASE_IMAGE = "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04"
+# GPU training targets x86_64 Linux. Building on Apple Silicon without this defaults to
+# linux/arm64, where box2d (stable-worldmodel[env]) has no wheels.
+DOCKER_PLATFORM = "linux/amd64"
 IMAGE_NAME = "cs231n_project/lewm"  # fixed local name — only tag should change between runs
 IMAGE_TAG = "latest"
 GHCR_IMAGE_OWNER = "jadhavan"  # default GHCR namespace — override with GHCR_IMAGE_OWNER env var
@@ -61,14 +64,15 @@ class DevTools:
         tag = tag or self._git_tag()
 
         if not self._image_exists_locally(BASE_IMAGE):
-            log.info("Base image not found locally, pulling: %s", BASE_IMAGE)
-            self._run(["docker", "pull", BASE_IMAGE])
+            log.info("Base image not found locally, pulling: %s (%s)", BASE_IMAGE, DOCKER_PLATFORM)
+            self._run(["docker", "pull", "--platform", DOCKER_PLATFORM, BASE_IMAGE])
         else:
             log.info("Base image already present: %s", BASE_IMAGE)
 
         start = time.monotonic()
         self._run([
             "docker", "build",
+            "--platform", DOCKER_PLATFORM,
             "-f", str(REPO_ROOT / "cloud" / "Dockerfile"),
             "-t", f"{IMAGE_NAME}:{tag}",
             str(REPO_ROOT),
@@ -130,7 +134,7 @@ class DevTools:
             raise EnvironmentError("STABLEWM_HOME environment variable is not set")
 
         flags = [
-            "--rm", "--gpus", "all",
+            "--rm", "--platform", DOCKER_PLATFORM,
             "--ipc=host",  # share host /dev/shm — avoids OOM from DataLoader pinned memory workers
             "-v", f"{stablewm_home}:/stablewm-home",
             "-e", "STABLEWM_HOME=/stablewm-home",

@@ -124,6 +124,8 @@ YYYYMMDD_GITHASH_GITBRANCH   e.g. 20260517_924f3ad_main
 
 ### Build
 
+Builds target **`linux/amd64`** (CUDA / `box2d` wheels). On Apple Silicon, Docker Desktop would otherwise build `arm64` and fail at `uv sync` with a missing `box2d` wheel.
+
 ```bash
 # auto-tagged from git
 ./devtools.py build_docker
