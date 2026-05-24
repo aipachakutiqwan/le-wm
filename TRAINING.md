@@ -209,3 +209,15 @@ The image is pulled from `ghcr.io/<image-owner-username>/lewm:<tag>` and automat
 | `pull_docker <tag>` | Pull image from GHCR and retag locally |
 | `run_local <tag> [--data] [--setup] [--overrides]` | Run training in baked image |
 | `dev <tag>` | Interactive shell with live repo mount |
+
+
+## 6. H-Leworld
+
+
+python train_hierarchical.py data=tworoom stage1_checkpoint=<path/to/lewm_object.ckpt> setup=cpu wandb.config.entity=florenciopaucar-uni stage2.n_epochs=1
+
+python plan_hierarchical.py checkpoint=<path/to/hierarchical_lewm_object.ckpt> device=cpu \
+    eval.num_eval=5 plan.outer_samples=64 plan.inner_samples=32
+
+
+

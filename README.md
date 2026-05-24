@@ -147,3 +147,4 @@ The returned module is in `eval` mode with its PyTorch weights accessible via `.
 
 ## Contact & Contributions
 Feel free to open [issues](https://github.com/lucas-maes/le-wm/issues)! For questions or collaborations, please contact `lucas.maes@mila.quebec`
+
