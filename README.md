@@ -148,9 +148,3 @@ The returned module is in `eval` mode with its PyTorch weights accessible via `.
 ## Contact & Contributions
 Feel free to open [issues](https://github.com/lucas-maes/le-wm/issues)! For questions or collaborations, please contact `lucas.maes@mila.quebec`
 
-## H-Leworld
-
-python train_hierarchical.py data=tworoom stage1_checkpoint=<path/to/lewm_object.ckpt> setup=cpu wandb.config.entity=florenciopaucar-uni stage2.n_epochs=1
-
-python plan_hierarchical.py checkpoint=<path/to/hierarchical_lewm_object.ckpt> device=cpu \
-    eval.num_eval=5 plan.outer_samples=64 plan.inner_samples=32

@@ -134,7 +134,7 @@ class DevTools:
             raise EnvironmentError("STABLEWM_HOME environment variable is not set")
 
         flags = [
-            "--rm", "--platform", DOCKER_PLATFORM,
+            "--rm", "--gpus", "all", "--platform", DOCKER_PLATFORM,
             "--ipc=host",  # share host /dev/shm — avoids OOM from DataLoader pinned memory workers
             "-v", f"{stablewm_home}:/stablewm-home",
             "-e", "STABLEWM_HOME=/stablewm-home",
