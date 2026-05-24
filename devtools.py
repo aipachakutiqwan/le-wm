@@ -159,6 +159,77 @@ class DevTools:
             cmd += overrides
         self._run(cmd)
 
+    def download_modal(self, *envs: str) -> None:
+        """Download datasets from HuggingFace directly into the Modal volume.
+
+        Much faster than uploading from local — Modal servers pull at datacenter speed.
+        Run once per dataset; reused across all training runs.
+
+        Examples:
+            ./devtools.py download_modal tworoom
+            ./devtools.py download_modal tworoom pusht
+        """
+        if not envs:
+            envs = ("tworoom",)
+        self._run([
+            "modal", "run", f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::download",
+            "--envs", ",".join(envs),
+        ])
+
+    def run_modal(self, tag: str, data: str = "tworoom", setup: str = "cloud_a10g",
+                  overrides: list = None, dry_run: bool = False) -> None:
+        """Submit a training job to Modal using the GHCR image.
+
+        Requires: pip install modal && modal setup
+        One-time volume/secret setup: see cloud/modal_train.py docstring.
+        """
+        overrides_str = ""
+        if overrides:
+            if isinstance(overrides, str):
+                overrides = overrides.strip("[]").split(",")
+            overrides_str = ",".join(overrides)
+
+        cmd = [
+            "modal", "run", str(REPO_ROOT / "cloud" / "modal_train.py"),
+            "--data", data,
+            "--setup", setup,
+        ]
+        if overrides_str:
+            cmd += ["--overrides", overrides_str]
+        if dry_run:
+            cmd += ["--dry-run"]
+
+        # LEWM_TAG is read at module import time by modal_train.py
+        env = {**os.environ, "LEWM_TAG": tag}
+        log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
+
+    def eval_modal(self, tag: str, policy: str, config: str = "tworoom", overrides: list = None) -> None:
+        """Submit an eval job to Modal using the GHCR image (A10G GPU).
+
+        policy: path to checkpoint directory or stem inside /stablewm-home
+                e.g. /stablewm-home/lewm_epoch_9  or  /stablewm-home/<run_id>
+
+        Requires: pip install modal && modal setup
+        """
+        overrides_str = ""
+        if overrides:
+            if isinstance(overrides, str):
+                overrides = overrides.strip("[]").split(",")
+            overrides_str = ",".join(overrides)
+
+        cmd = [
+            "modal", "run", f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::eval",
+            "--policy", policy,
+            "--config", config,
+        ]
+        if overrides_str:
+            cmd += ["--overrides", overrides_str]
+
+        env = {**os.environ, "LEWM_TAG": tag}
+        log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
+
     def dev(self, tag: str) -> None:
         """Launch a bash shell with the local repo mounted at /app.
         Edits to the repo on the host are instantly reflected inside the container.
