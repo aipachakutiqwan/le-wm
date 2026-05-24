@@ -2,10 +2,19 @@
 name = "le-wm"
 version = "0.0.1"
 description = "LeWorldModel"
-requires-python = ">=3.12"
+requires-python = ">=3.10,<3.13"
 
 dependencies = [
-    "stable-worldmodel"
+    "datasets>=2.14.4",
+    "hydra-core>=1.3.2",
+    "imageio>=2.37.3",
+    "lightning>=2.6.1",
+    "scikit-learn>=1.7.2",
+    "stable-pretraining>=0.1.6",
+    "stable-worldmodel[env,train]",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "wandb>=0.27.0",
 ]
 
 readme = "README.md"
@@ -47,6 +56,13 @@ distribution = false
 
 [tool.uv.sources]
 deepsnap = { git = "https://github.com/snap-stanford/deepsnap.git" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 
 [dependency-groups]

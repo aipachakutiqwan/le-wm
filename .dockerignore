@@ -1,0 +1,17 @@
+.venv/
+.git/
+outputs/
+lightning_logs/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+le_wm.egg-info/
+
+# environment snapshots and frozen deps
+environment*.json
+requirements_frozen*.txt
+
+# datasets — mounted at runtime, never baked into the image
+*.h5
+*.hdf5
