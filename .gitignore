@@ -243,5 +243,6 @@ uv.lock
 # model checkpoints
 lewm/
 
-
+# assets
+assets/*.svg
 
