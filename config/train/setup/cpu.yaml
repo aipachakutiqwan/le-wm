@@ -5,6 +5,11 @@
 
 device: cpu
 
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 32
+
 loader:
   num_workers: 0
   pin_memory: false

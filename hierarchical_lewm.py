@@ -10,12 +10,15 @@ New components (jepa.py and module.py are not modified):
 See hierarchical_plan.py for the two-level CEM-MPC planner.
 """
 
+import logging
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from jepa import JEPA
 from module import ARPredictor
+
+py_log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -379,6 +382,7 @@ class HierarchicalLeWM(nn.Module):
 def train_hierarchical_lewm(
     model: HierarchicalLeWM,
     dataloader,
+    val_dataloader=None,
     n_waypoints: int = 3,
     lr: float = 1e-4,
     n_epochs: int = 10,
@@ -396,6 +400,8 @@ def train_hierarchical_lewm(
     ----------
     model          : HierarchicalLeWM with a stage-1-trained inner jepa
     dataloader     : yields batches with 'pixels' and 'action' keys
+    val_dataloader : optional validation dataloader; if provided, val loss is
+                     computed and logged at the end of each epoch
     n_waypoints    : N interior waypoints per trajectory (HWM default 3)
     lr             : AdamW learning rate for stage-2 parameters
     n_epochs       : number of stage-2 epochs
@@ -415,10 +421,11 @@ def train_hierarchical_lewm(
         for p in model.jepa.parameters():
             p.requires_grad_(False)
 
-    model.train()
+    n_batches = len(dataloader)
     for epoch in range(n_epochs):
+        model.train()
         epoch_loss = 0.0
-        for batch in dataloader:
+        for batch_idx, batch in enumerate(dataloader):
             batch = {
                 k: v.to(device) if torch.is_tensor(v) else v
                 for k, v in batch.items()
@@ -431,11 +438,39 @@ def train_hierarchical_lewm(
             optimizer.zero_grad()
             out["loss"].backward()
             optimizer.step()
-            epoch_loss += out["loss"].item()
+            batch_loss = out["loss"].item()
+            epoch_loss += batch_loss
+
+            if (batch_idx + 1) % max(1, n_batches // 10) == 0:
+                py_log.info(
+                    "epoch %d/%d  batch %d/%d  L_tf: %.5f",
+                    epoch + 1, n_epochs, batch_idx + 1, n_batches, batch_loss,
+                )
 
         avg_loss = epoch_loss / len(dataloader)
-        print(f"epoch {epoch + 1}/{n_epochs}  stage-2 L_tf: {avg_loss:.5f}")
+
+        log = {"stage2/train_loss": avg_loss, "stage2/epoch": epoch + 1}
+
+        if val_dataloader is not None:
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_dataloader:
+                    batch = {
+                        k: v.to(device) if torch.is_tensor(v) else v
+                        for k, v in batch.items()
+                    }
+                    T = batch["pixels"].shape[1]
+                    wp_idx = sample_waypoints(T, N=n_waypoints, device=device)
+                    out = model.forward_high(batch, wp_idx, freeze_encoder=freeze_encoder)
+                    val_loss += out["loss"].item()
+            avg_val_loss = val_loss / len(val_dataloader)
+            log["stage2/val_loss"] = avg_val_loss
+            py_log.info("epoch %d/%d  train L_tf: %.5f  val L_tf: %.5f", epoch + 1, n_epochs, avg_loss, avg_val_loss)
+        else:
+            py_log.info("epoch %d/%d  stage-2 L_tf: %.5f", epoch + 1, n_epochs, avg_loss)
+
         if wandb_run is not None:
-            wandb_run.log({"stage2/loss": avg_loss}, step=epoch + 1)
+            wandb_run.log(log, step=epoch + 1)
 
     return model

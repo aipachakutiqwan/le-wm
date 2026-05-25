@@ -3,6 +3,7 @@ defaults:
   - data: tworoom
   - setup: null
 
+
 # Path to the stage-1 .ckpt saved by ModelObjectCallBack (torch.save of JEPA object).
 # Example: outputs/20240101_120000/lewm_epoch_100_object.ckpt
 stage1_checkpoint: ???
@@ -17,7 +18,14 @@ encoder_scale: tiny
 
 train_split: 0.9
 
-device: cuda 
+trainer:
+  max_epochs: ${stage2.n_epochs}
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
 
 loader:
   batch_size: 64
