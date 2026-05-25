@@ -264,6 +264,14 @@ class HierarchicalLeWM(nn.Module):
             mlp_dim=high_mlp_dim,
         )
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # JEPA must stay in eval mode throughout stage-2 training so that encoder
+        # dropout and any norm running-stats are not affected by Lightning's
+        # model.train() calls at the start of each epoch.
+        self.jepa.eval()
+        return self
+
     # ── Stage-1 forward ──────────────────────────────────────────────────────
 
     def forward_low(self, obs: dict) -> dict:
