@@ -68,11 +68,17 @@ class HierarchicalStage2Module(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         out = self._step(batch)
         self.log("stage2/train_loss", out["loss"], on_step=True, on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("stage2/train_loss_tf", out["loss_tf"], on_step=True, on_epoch=True, sync_dist=True)
+        if self.cfg.wm.lambda_sigreg > 0.0:
+            self.log("stage2/train_loss_reg", out["loss_reg"], on_step=True, on_epoch=True, sync_dist=True)
         return out["loss"]
 
     def validation_step(self, batch, batch_idx):
         out = self._step(batch)
         self.log("stage2/val_loss", out["loss"], on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("stage2/val_loss_tf", out["loss_tf"], on_step=False, on_epoch=True, sync_dist=True)
+        if self.cfg.wm.lambda_sigreg > 0.0:
+            self.log("stage2/val_loss_reg", out["loss_reg"], on_step=False, on_epoch=True, sync_dist=True)
 
     def configure_optimizers(self):
         params = (
@@ -150,6 +156,7 @@ def run(cfg):
         latent_action_dim=cfg.wm.latent_action_dim,
         n_waypoints=cfg.wm.n_waypoints,
         history_size=cfg.wm.history_size,
+        lambda_sigreg=cfg.wm.lambda_sigreg,
         high_depth=cfg.wm.high_depth,
         high_heads=cfg.wm.high_heads,
         high_mlp_dim=cfg.wm.high_mlp_dim,

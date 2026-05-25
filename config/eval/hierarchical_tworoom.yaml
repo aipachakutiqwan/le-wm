@@ -32,10 +32,10 @@ plan:
 
 # MPC loop config fed to swm.PlanConfig
 plan_config:
-  horizon: 1          # plan 1 high-level step per call (subgoal obtained internally)
-  receding_horizon: 1  # replan every primitive action
+  horizon: 5          # plan 1 high-level step per call (subgoal obtained internally)
+  receding_horizon: 5  # replan every primitive action
   history_len: 1
-  action_block: 1     # 1 primitive action per plan call; frameskip handled by world.frame_skip
+  action_block: 5     # 1 primitive action per plan call; frameskip handled by world.frame_skip
 
 eval:
   num_eval: 50

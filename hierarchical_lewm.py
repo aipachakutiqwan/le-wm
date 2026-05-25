@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from jepa import JEPA
-from module import ARPredictor
+from module import ARPredictor, SIGReg
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -215,6 +215,10 @@ class HierarchicalLeWM(nn.Module):
     latent_action_dim : d_L — HWM default 4 (sweep this first when tuning)
     n_waypoints       : N interior waypoints per trajectory (HWM default 3)
     history_size      : low-level context window size (must match stage-1 training)
+    lambda_sigreg     : weight for SIGReg on P^(2) predicted waypoints (0 = disabled).
+                        Encourages predicted subgoals to stay within the Gaussian
+                        support of the real latent space, mitigating infeasible subgoals.
+                        Recommended range: 0.01–0.1 (same order as stage-1 default).
     """
 
     def __init__(
@@ -225,6 +229,7 @@ class HierarchicalLeWM(nn.Module):
         latent_action_dim: int = 4,
         n_waypoints: int = 3,
         history_size: int = 3,
+        lambda_sigreg: float = 0.0,
         # high-level predictor knobs (mirror low-level defaults from train.py)
         high_depth: int = 6,
         high_heads: int = 16,
@@ -242,6 +247,9 @@ class HierarchicalLeWM(nn.Module):
         self.n_waypoints = n_waypoints
         self.action_dim = action_dim
         self.history_size = history_size
+        self.lambda_sigreg = lambda_sigreg
+        if lambda_sigreg > 0.0:
+            self.sigreg = SIGReg()
 
         self.action_encoder_high = ActionEncoder(
             action_dim=action_dim,
@@ -325,10 +333,22 @@ class HierarchicalLeWM(nn.Module):
         pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
         target_emb = wp_emb[:, 1:].detach()                             # (B, n_seg, D)
 
-        loss = F.l1_loss(pred_emb, target_emb)
+        loss_tf = F.l1_loss(pred_emb, target_emb)
+
+        if self.lambda_sigreg > 0.0:
+            # SIGReg on predicted waypoints keeps P^(2) outputs within the Gaussian
+            # support of the real latent space, mitigating infeasible subgoals.
+            # SIGReg expects (T, B, D); pred_emb is (B, n_seg, D).
+            loss_reg = self.sigreg(pred_emb.permute(1, 0, 2))
+            loss = loss_tf + self.lambda_sigreg * loss_reg
+        else:
+            loss = loss_tf
+            loss_reg = pred_emb.new_zeros(1).squeeze()
 
         return {
             "loss": loss,
+            "loss_tf": loss_tf,
+            "loss_reg": loss_reg,
             "high_pred_emb": pred_emb,
             "high_target_emb": target_emb,
         }
