@@ -32,7 +32,7 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
 from hierarchical_lewm import HierarchicalLeWM, sample_waypoints
-from utils import get_column_normalizer, get_img_preprocessor
+from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -200,8 +200,13 @@ def run(cfg):
     lm = HierarchicalStage2Module(model, cfg)
     data_module = spt.data.DataModule(train=dataloader, val=val_dataloader)
 
+    object_dump_callback = ModelObjectCallBack(
+        dirpath=run_dir, filename=cfg.output_model_name, epoch_interval=1,
+    )
+
     trainer = pl.Trainer(
         **cfg.trainer,
+        callbacks=[object_dump_callback],
         num_sanity_val_steps=1,
         logger=logger,
         enable_checkpointing=True,
