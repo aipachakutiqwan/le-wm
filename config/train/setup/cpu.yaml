@@ -9,6 +9,7 @@ trainer:
   accelerator: cpu
   devices: 1
   precision: 32
+  strategy: auto
 
 loader:
   num_workers: 0

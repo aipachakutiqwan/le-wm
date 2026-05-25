@@ -26,6 +26,7 @@ trainer:
   gradient_clip_val: 1.0
   limit_train_batches: 1.0
   limit_val_batches: 1.0
+  strategy: ddp_find_unused_parameters_true
 
 loader:
   batch_size: 64
