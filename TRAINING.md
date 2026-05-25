@@ -110,9 +110,59 @@ Find artifacts at: `https://wandb.ai/<entity>/<project>/artifacts/model`
 
 ---
 
-## 4. Docker
+## 4. Eval
+
+Evaluation runs live MuJoCo environments — requires a built checkpoint and the `tworoom` (or other) dataset in `$STABLEWM_HOME`.
+
+Checkpoints tracked by Git LFS must be pulled on the host before eval — the container mounts `/app` from the host, so the real binary becomes visible immediately without a rebuild:
+
+```bash
+# on the host, before entering the container
+git lfs pull --include="baseline/tworoom/lewm_epoch_9_object.ckpt"
+```
+
+Pass the **directory** containing the checkpoint as `policy`. `AutoCostModel` will pick the latest `*_object.ckpt` inside it automatically.
+
+```bash
+# inside the Docker dev shell (./devtools.py dev <tag>)
+cd /app
+python eval.py --config-name tworoom policy=/app/baseline/tworoom
+
+# override eval episodes or planning horizon
+python eval.py --config-name tworoom \
+  policy=/app/baseline/tworoom \
+  eval.num_eval=50 \
+  plan_config.horizon=5
+
+# custom output file
+python eval.py --config-name tworoom \
+  policy=/app/baseline/tworoom \
+  output.filename=my_results.txt
+```
+
+> **Do not pass the full `.ckpt` filename** — `AutoCostModel` appends `_object.ckpt` itself and will double-suffix it.
+
+Results are written to `Path($STABLEWM_HOME, policy).parent / output.filename`.
+For `policy=/app/baseline/tworoom`, that resolves to `/app/baseline/tworoom_results.txt`.
+
+### Eval config reference (`config/eval/tworoom.yaml`)
+
+| Key | Default | Notes |
+|---|---|---|
+| `policy` | `random` | Directory or stem path to checkpoint |
+| `eval.num_eval` | `50` | Number of episodes to evaluate |
+| `eval.eval_budget` | `50` | Max steps per episode |
+| `plan_config.horizon` | `5` | Planning horizon |
+| `plan_config.action_block` | `5` | Actions executed per planning step |
+| `output.filename` | `tworoom_results.txt` | Output file (appended, not overwritten) |
+
+---
+
+## 5. Docker
 
 All Docker operations go through `./devtools.py`. Image name is fixed as `cs231n_project/lewm`.
+
+> **Eval requires EGL.** The image installs `libegl1`, `libgl1`, and `libglfw3` so MuJoCo can render headlessly. `eval.py` sets `MUJOCO_GL=egl` automatically — no extra flags needed at runtime.
 
 ### Image tagging
 
@@ -199,7 +249,7 @@ The image is pulled from `ghcr.io/<image-owner-username>/lewm:<tag>` and automat
 
 ---
 
-## 5. devtools.py reference
+## 6. devtools.py reference
 
 | Command | Description |
 |---|---|
@@ -211,7 +261,7 @@ The image is pulled from `ghcr.io/<image-owner-username>/lewm:<tag>` and automat
 | `dev <tag>` | Interactive shell with live repo mount |
 
 
-## 6. H-Leworld
+## 7. H-Leworld
 
 
 python train_hierarchical.py data=tworoom stage1_checkpoint=<path/to/lewm_object.ckpt> setup=cpu wandb.config.entity=florenciopaucar-uni stage2.n_epochs=1
