@@ -198,7 +198,7 @@ class HierarchicalLeWM(nn.Module):
 
     Training
     --------
-    Stage 1 — train the inner JEPA normally (see train.py / train_hierarchical_lewm).
+    Stage 1 — train the inner JEPA normally (see train.py).
     Stage 2 — freeze E and P^(1); jointly train A_ψ and P^(2) on the teacher-forcing
                waypoint loss L_tf = (1/N) Σ_k ‖ẑ_{t_{k+1}} − z_{t_{k+1}}‖_1.
 
