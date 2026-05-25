@@ -8,9 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 RUN apt-get update && apt-get install -y \
     git \
+    git-lfs \
     curl \
     python3 \
     python3-pip \
+    libegl1 \
+    libgl1 \
+    libglfw3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
