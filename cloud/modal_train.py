@@ -249,6 +249,7 @@ def eval_job(
 def train_hierarchical(
     stage1_checkpoint: str,
     data: str = "tworoom",
+    setup: str = "cloud_a100",
     overrides: Optional[list[str]] = None,
     subdir: Optional[str] = None,
     monitor_interval: int = 60,
@@ -259,6 +260,8 @@ def train_hierarchical(
         stage1_checkpoint: Absolute path to the stage-1 .ckpt inside /stablewm-home.
                            e.g. "/stablewm-home/lewm_epoch_100_object.ckpt"
         data:              Hydra data config (tworoom, pusht, reacher, cube)
+        setup:             Hydra setup config — drives batch size, num_workers, and
+                           wandb entity/project. Defaults to cloud_a100 (matches GPU).
         overrides:         List of Hydra overrides, e.g. ["stage2.n_epochs=50"]
         subdir:            Optional output subdirectory name inside STABLEWM_HOME.
         monitor_interval:  Seconds between resource log lines.
@@ -297,6 +300,7 @@ def train_hierarchical(
         "python", "train_hierarchical.py",
         f"stage1_checkpoint={stage1_checkpoint}",
         f"data={data}",
+        f"setup={setup}",
     ]
     if subdir:
         cmd += [f"subdir={subdir}"]
@@ -399,6 +403,7 @@ def eval(
 def train_hier(
     stage1_checkpoint: str,
     data: str = "tworoom",
+    setup: str = "cloud_a100",
     overrides: str = "",
     dry_run: bool = False,
 ):
@@ -412,6 +417,7 @@ def train_hier(
         stage1_checkpoint: Absolute path inside /stablewm-home.
                            e.g. "/stablewm-home/lewm_epoch_100_object.ckpt"
         data:      Hydra data config (tworoom, pusht, reacher, cube)
+        setup:     Hydra setup config (default cloud_a100 — matches the GPU)
         overrides: Comma-separated Hydra overrides
                    e.g. "stage2.n_epochs=50,loader.batch_size=128,wandb.enabled=True"
         dry_run:   Limits to 2 epochs, batch_size=8, disables W&B (~5 min sanity check)
@@ -431,10 +437,11 @@ def train_hier(
             "wandb.enabled=False",
         ]
 
-    print(f"[local] submitting hierarchical job — image: {_tag}, checkpoint: {stage1_checkpoint}")
+    print(f"[local] submitting hierarchical job — image: {_tag}, checkpoint: {stage1_checkpoint}, setup: {setup}")
     print(f"[local] overrides: {override_list}")
     train_hierarchical.remote(
         stage1_checkpoint=stage1_checkpoint,
         data=data,
+        setup=setup,
         overrides=override_list,
     )

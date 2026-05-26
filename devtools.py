@@ -263,7 +263,8 @@ class DevTools:
         self._run(cmd)
 
     def run_hierarchical_modal(self, tag: str, stage1_checkpoint: str,
-                               data: str = "tworoom", overrides: list = None,
+                               data: str = "tworoom", setup: str = "cloud_a100",
+                               overrides: list = None,
                                dry_run: bool = False) -> None:
         """Submit a stage-2 hierarchical training job to Modal (A100 GPU).
 
@@ -273,6 +274,8 @@ class DevTools:
 
         stage1_checkpoint: absolute path inside /stablewm-home in the Modal volume.
                            e.g. /stablewm-home/lewm_epoch_100_object.ckpt
+        setup:             Hydra setup config (default cloud_a100 — drives batch size
+                           and wandb entity/project to match the GPU)
 
         Requires: pip install modal && modal setup
         """
@@ -287,6 +290,7 @@ class DevTools:
             f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::train_hier",
             "--stage1-checkpoint", stage1_checkpoint,
             "--data", data,
+            "--setup", setup,
         ]
         if overrides_str:
             cmd += ["--overrides", overrides_str]
