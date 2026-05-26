@@ -59,9 +59,9 @@ wm:
   action_enc_depth: 2
   action_enc_heads: 4
 
-# Stage-2 needs longer windows than stage-1 (4 frames) so waypoints are meaningful.
-# The training script injects this into cfg.data.dataset.num_steps before dataset init.
-stage2_num_steps: 20
+# Stage-2 window aligned to eval planning horizon: (N+1) * h_low = 4 * 10 = 40 frames.
+# Ensures each training segment (~10 steps) matches the low-level CEM rollout length.
+stage2_num_steps: 40
 
 wandb:
   enabled: True
