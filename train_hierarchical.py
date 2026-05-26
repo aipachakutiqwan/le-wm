@@ -31,6 +31,11 @@ import stable_worldmodel as swm
 import torch
 from omegaconf import OmegaConf, open_dict
 
+# DataLoader workers pass tensors via /dev/shm by default. Modal containers cap
+# /dev/shm small, so multi-worker loading with large batches blows it out with
+# "No space left on device". file_system strategy uses regular tmpfs/RAM instead.
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 from hierarchical_lewm import HierarchicalLeWM, train_hierarchical_lewm
 from utils import get_column_normalizer, get_img_preprocessor
 
