@@ -228,6 +228,89 @@ def eval_job(
 
 
 # ---------------------------------------------------------------------------
+# Hierarchical training (stage 2)
+# ---------------------------------------------------------------------------
+
+
+@app.function(
+    image=TRAIN_IMAGE,
+    gpu=GPU,
+    volumes={"/stablewm-home": volume},
+    secrets=[modal.Secret.from_name("wandb-secret")],
+    timeout=60 * 60 * 16,
+    retries=0,
+)
+def train_hierarchical(
+    stage1_checkpoint: str,
+    data: str = "tworoom",
+    overrides: Optional[list[str]] = None,
+    subdir: Optional[str] = None,
+    monitor_interval: int = 60,
+) -> int:
+    """Run train_hierarchical.py (stage-2) inside the container with Hydra overrides.
+
+    Args:
+        stage1_checkpoint: Absolute path to the stage-1 .ckpt inside /stablewm-home.
+                           e.g. "/stablewm-home/lewm_epoch_100_object.ckpt"
+        data:              Hydra data config (tworoom, pusht, reacher, cube)
+        overrides:         List of Hydra overrides, e.g. ["stage2.n_epochs=50"]
+        subdir:            Optional output subdirectory name inside STABLEWM_HOME.
+        monitor_interval:  Seconds between resource log lines.
+    """
+    import threading
+    import psutil
+
+    stop_event = threading.Event()
+
+    def _monitor():
+        gpu_query = "utilization.gpu,utilization.memory,memory.used,memory.total,power.draw"
+        header = f"{'GPU%':>5} {'GMEM%':>6} {'VRAM':>12}  {'CPU%':>5} {'RAM':>12}"
+        print(f"[res] {header}", flush=True)
+        while not stop_event.wait(timeout=monitor_interval):
+            try:
+                out = subprocess.check_output(
+                    ["nvidia-smi", f"--query-gpu={gpu_query}", "--format=csv,noheader,nounits"],
+                    text=True,
+                ).strip()
+                gpu_util, gmem_util, vram_used, vram_total, power = [x.strip() for x in out.split(",")]
+                vram_str = f"{vram_used}/{vram_total}MiB"
+            except Exception:
+                gpu_util = gmem_util = vram_str = power = "n/a"
+
+            cpu_pct = psutil.cpu_percent(interval=None)
+            ram = psutil.virtual_memory()
+            ram_str = f"{ram.used/1e9:.1f}/{ram.total/1e9:.1f}GB"
+            print(
+                f"[res] {gpu_util:>4}%  {gmem_util:>5}%  {vram_str:>12}  {cpu_pct:>4}%  {ram_str:>12}",
+                flush=True,
+            )
+
+    threading.Thread(target=_monitor, daemon=True).start()
+
+    cmd = [
+        "python", "train_hierarchical.py",
+        f"stage1_checkpoint={stage1_checkpoint}",
+        f"data={data}",
+    ]
+    if subdir:
+        cmd += [f"subdir={subdir}"]
+    if overrides:
+        cmd += overrides
+
+    print(f"[modal] running: {' '.join(cmd)}", flush=True)
+    result = subprocess.run(cmd, cwd="/app", check=False)
+
+    stop_event.set()
+    volume.commit()  # persist the trained hierarchical model to the volume
+
+    if result.returncode != 0:
+        print(f"[modal] hierarchical training failed with exit code {result.returncode}", flush=True)
+        sys.exit(result.returncode)
+
+    return result.returncode
+
+
+# ---------------------------------------------------------------------------
 # Local entrypoints
 # ---------------------------------------------------------------------------
 
@@ -304,3 +387,48 @@ def eval(
     print(f"[local] overrides: {override_list}")
 
     eval_job.remote(policy=policy, config=config, overrides=override_list)
+
+
+@app.local_entrypoint()
+def train_hier(
+    stage1_checkpoint: str,
+    data: str = "tworoom",
+    overrides: str = "",
+    dry_run: bool = False,
+):
+    """Submit a stage-2 hierarchical training job (A100). Set LEWM_TAG env var to select the image.
+
+    The stage-1 checkpoint must already be in the Modal volume at /stablewm-home.
+    Upload it first if needed:
+        modal volume put lewm-data <local_path>_object.ckpt <filename>_object.ckpt
+
+    Args:
+        stage1_checkpoint: Absolute path inside /stablewm-home.
+                           e.g. "/stablewm-home/lewm_epoch_100_object.ckpt"
+        data:      Hydra data config (tworoom, pusht, reacher, cube)
+        overrides: Comma-separated Hydra overrides
+                   e.g. "stage2.n_epochs=50,loader.batch_size=128,wandb.enabled=True"
+        dry_run:   Limits to 2 epochs, batch_size=8, disables W&B (~5 min sanity check)
+    """
+    if not _tag:
+        raise SystemExit(
+            "LEWM_TAG env var is not set. "
+            "Use ./devtools.py run_hierarchical_modal <tag> --stage1-checkpoint <path> "
+            "or: LEWM_TAG=<tag> modal run cloud/modal_train.py::train_hier --stage1-checkpoint <path>"
+        )
+
+    override_list = [o.strip() for o in overrides.split(",") if o.strip()]
+    if dry_run:
+        override_list += [
+            "stage2.n_epochs=2",
+            "loader.batch_size=8",
+            "wandb.enabled=False",
+        ]
+
+    print(f"[local] submitting hierarchical job — image: {_tag}, checkpoint: {stage1_checkpoint}")
+    print(f"[local] overrides: {override_list}")
+    train_hierarchical.remote(
+        stage1_checkpoint=stage1_checkpoint,
+        data=data,
+        overrides=override_list,
+    )

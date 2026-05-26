@@ -204,6 +204,78 @@ class DevTools:
         log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
         subprocess.run(cmd, check=True, env=env)
 
+    def run_hierarchical_local(self, tag: str, stage1_checkpoint: str,
+                               data: str = "tworoom", setup: str = None,
+                               overrides: list = None, dry_run: bool = False) -> None:
+        """Run stage-2 hierarchical training locally inside the Docker container.
+
+        stage1_checkpoint: path inside the container. If the checkpoint lives in
+                           STABLEWM_HOME it will be at /stablewm-home/<filename>.ckpt.
+                           Alternatively use /app/baseline/... for Git-tracked files.
+        """
+        override_list = []
+        if overrides:
+            if isinstance(overrides, str):
+                override_list = overrides.strip("[]").split(",")
+            else:
+                override_list = list(overrides)
+
+        if dry_run:
+            override_list += [
+                "stage2.n_epochs=2",
+                "loader.batch_size=8",
+                "wandb.enabled=False",
+            ]
+
+        cmd = [
+            "docker", "run",
+            "--entrypoint", "python",
+        ] + self._base_run_flags() + [
+            f"{IMAGE_NAME}:{tag}",
+            "train_hierarchical.py",
+            f"stage1_checkpoint={stage1_checkpoint}",
+            f"data={data}",
+        ]
+        if setup:
+            cmd += [f"setup={setup}"]
+        cmd += override_list
+        self._run(cmd)
+
+    def run_hierarchical_modal(self, tag: str, stage1_checkpoint: str,
+                               data: str = "tworoom", overrides: list = None,
+                               dry_run: bool = False) -> None:
+        """Submit a stage-2 hierarchical training job to Modal (A100 GPU).
+
+        The stage-1 checkpoint must already be in the Modal volume.
+        Upload it first if needed:
+            modal volume put lewm-data <local>_object.ckpt <filename>_object.ckpt
+
+        stage1_checkpoint: absolute path inside /stablewm-home in the Modal volume.
+                           e.g. /stablewm-home/lewm_epoch_100_object.ckpt
+
+        Requires: pip install modal && modal setup
+        """
+        overrides_str = ""
+        if overrides:
+            if isinstance(overrides, str):
+                overrides = overrides.strip("[]").split(",")
+            overrides_str = ",".join(overrides)
+
+        cmd = [
+            "modal", "run",
+            f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::train_hier",
+            "--stage1-checkpoint", stage1_checkpoint,
+            "--data", data,
+        ]
+        if overrides_str:
+            cmd += ["--overrides", overrides_str]
+        if dry_run:
+            cmd += ["--dry-run"]
+
+        env = {**os.environ, "LEWM_TAG": tag}
+        log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
+
     def eval_modal(self, tag: str, policy: str, config: str = "tworoom", overrides: list = None) -> None:
         """Submit an eval job to Modal using the GHCR image (A10G GPU).
 
