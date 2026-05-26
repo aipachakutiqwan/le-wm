@@ -24,16 +24,14 @@ from module import ARPredictor, SIGReg
 
 
 def sample_waypoints(T: int, N: int = 3, device=None) -> torch.Tensor:
-    """N random interior indices plus the two fixed endpoints [0, T-1].
+    """N evenly spaced interior waypoints plus fixed endpoints [0, T-1].
 
     Returns a sorted 1-D tensor of shape (N+2,).
     Falls back to a full arange when N >= T-1 (very short trajectories).
     """
     if N >= T - 1:
         return torch.arange(T, device=device)
-    interior = torch.randperm(T - 2, device=device)[:N] + 1  # never 0 or T-1
-    endpoints = torch.tensor([0, T - 1], device=device)
-    return torch.cat([endpoints, interior]).sort().values
+    return torch.linspace(0, T - 1, N + 2, device=device).round().long()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
