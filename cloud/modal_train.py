@@ -53,9 +53,15 @@ _REPO_ROOT  = Path(__file__).parent.parent
 # ---------------------------------------------------------------------------
 
 def make_image(tag: str) -> modal.Image:
+    # psutil is used by the resource monitor thread below; it's a transitive of
+    # ipykernel (a dev-only dep) so `uv sync --no-dev` in the Dockerfile drops it.
+    # The image's venv at /opt/venv has no pip (uv-managed), so use uv from its
+    # install location to add psutil into that venv.
     return modal.Image.from_registry(
         f"ghcr.io/{GHCR_OWNER}/{IMAGE_NAME}:{tag}",
         secret=modal.Secret.from_name("ghcr-secret"),
+    ).run_commands(
+        "/root/.local/bin/uv pip install --python /opt/venv/bin/python psutil"
     )
 
 
