@@ -38,8 +38,9 @@ wm:
   num_preds: 1
   history_size: 3
   embed_dim: 192          # must match the stage-1 embed_dim
-  n_waypoints: 3          # N interior waypoints (HWM default)
+  n_waypoints: 3          # N interior waypoints; fixed-stride spacing across T frames
   latent_action_dim: 4    # d_L — sweep this first when tuning
+  lambda_var: 0.01        # hinge variance penalty on macro-actions (0 = disabled)
   high_depth: 6
   high_heads: 16
   high_mlp_dim: 2048

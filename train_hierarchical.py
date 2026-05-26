@@ -91,6 +91,7 @@ def run(cfg):
         latent_action_dim=cfg.wm.latent_action_dim,
         n_waypoints=cfg.wm.n_waypoints,
         history_size=cfg.wm.history_size,
+        lambda_var=cfg.wm.lambda_var,
         high_depth=cfg.wm.high_depth,
         high_heads=cfg.wm.high_heads,
         high_mlp_dim=cfg.wm.high_mlp_dim,

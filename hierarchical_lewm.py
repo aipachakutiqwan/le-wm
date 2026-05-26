@@ -16,6 +16,7 @@ from torch import nn
 
 from jepa import JEPA
 from module import ARPredictor
+from waypoint_sampler import sample_waypoints_fixed_stride
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -225,6 +226,7 @@ class HierarchicalLeWM(nn.Module):
         latent_action_dim: int = 4,
         n_waypoints: int = 3,
         history_size: int = 3,
+        lambda_var: float = 0.0,
         # high-level predictor knobs (mirror low-level defaults from train.py)
         high_depth: int = 6,
         high_heads: int = 16,
@@ -242,6 +244,7 @@ class HierarchicalLeWM(nn.Module):
         self.n_waypoints = n_waypoints
         self.action_dim = action_dim
         self.history_size = history_size
+        self.lambda_var = lambda_var
 
         self.action_encoder_high = ActionEncoder(
             action_dim=action_dim,
@@ -260,6 +263,12 @@ class HierarchicalLeWM(nn.Module):
             heads=high_heads,
             mlp_dim=high_mlp_dim,
         )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # Keep JEPA in eval so its dropout/BN stats are unaffected by stage-2.
+        self.jepa.eval()
+        return self
 
     # ── Stage-1 forward ──────────────────────────────────────────────────────
 
@@ -317,10 +326,26 @@ class HierarchicalLeWM(nn.Module):
         pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
         target_emb = wp_emb[:, 1:].detach()                             # (B, n_seg, D)
 
-        loss = F.l1_loss(pred_emb, target_emb)
+        loss_pred = F.mse_loss(pred_emb, target_emb)
+
+        if self.lambda_var > 0.0:
+            # Variance penalty on macro-actions — prevents A_ψ from collapsing to a
+            # constant embedding regardless of the input action chunk.  The hinge form
+            # relu(γ − std) only penalises dimensions whose batch std falls below γ=1;
+            # once std > 1 the gradient is zero, so the loss does not fight natural
+            # spread in the data.  Technique adapted from the VICReg variance term
+            # (Bardes et al., 2022 — https://arxiv.org/abs/2105.04906, Eq. 2).
+            flat = macro_actions.reshape(-1, self.latent_action_dim)
+            loss_var = F.relu(1.0 - flat.std(dim=0)).mean()
+            loss = loss_pred + self.lambda_var * loss_var
+        else:
+            loss = loss_pred
+            loss_var = pred_emb.new_zeros(1).squeeze()
 
         return {
             "loss": loss,
+            "loss_pred": loss_pred,
+            "loss_var": loss_var,
             "high_pred_emb": pred_emb,
             "high_target_emb": target_emb,
         }
@@ -417,14 +442,14 @@ def train_hierarchical_lewm(
 
     model.train()
     for epoch in range(n_epochs):
-        epoch_loss = 0.0
+        epoch_loss = epoch_pred = epoch_var = 0.0
         for batch in dataloader:
             batch = {
                 k: v.to(device) if torch.is_tensor(v) else v
                 for k, v in batch.items()
             }
             T = batch["pixels"].shape[1]
-            wp_idx = sample_waypoints(T, N=n_waypoints, device=device)
+            wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
 
             out = model.forward_high(batch, wp_idx, freeze_encoder=freeze_encoder)
 
@@ -432,10 +457,19 @@ def train_hierarchical_lewm(
             out["loss"].backward()
             optimizer.step()
             epoch_loss += out["loss"].item()
+            epoch_pred += out["loss_pred"].item()
+            epoch_var  += out["loss_var"].item()
 
-        avg_loss = epoch_loss / len(dataloader)
-        print(f"epoch {epoch + 1}/{n_epochs}  stage-2 L_tf: {avg_loss:.5f}")
+        n = len(dataloader)
+        print(
+            f"epoch {epoch + 1}/{n_epochs}  "
+            f"loss: {epoch_loss/n:.5f}  pred: {epoch_pred/n:.5f}  var: {epoch_var/n:.5f}"
+        )
         if wandb_run is not None:
-            wandb_run.log({"stage2/loss": avg_loss}, step=epoch + 1)
+            wandb_run.log({
+                "stage2/loss":      epoch_loss / n,
+                "stage2/loss_pred": epoch_pred / n,
+                "stage2/loss_var":  epoch_var  / n,
+            }, step=epoch + 1)
 
     return model
