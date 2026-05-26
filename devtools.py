@@ -4,6 +4,7 @@
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -60,14 +61,7 @@ class DevTools:
         return bool(result.stdout.strip())
 
     def build_docker(self, tag: str = None, push: bool = False, username: str = None, registry: str = "ghcr.io") -> None:
-        """Pull base image if needed, then build the training image.
-
-        When push=True, uses docker buildx build --push which produces OCI-format
-        layers required by Modal's umoci image builder. The image is also pulled
-        back locally so run_local and dev still work after a push.
-
-        When push=False, uses plain docker build (faster, no buildx needed).
-        """
+        """Pull base image if needed, then build the training image."""
         tag = tag or self._git_tag()
 
         if not self._image_exists_locally(BASE_IMAGE):
@@ -77,38 +71,19 @@ class DevTools:
             log.info("Base image already present: %s", BASE_IMAGE)
 
         start = time.monotonic()
+        self._run([
+            "docker", "build",
+            "--platform", DOCKER_PLATFORM,
+            "-f", str(REPO_ROOT / "cloud" / "Dockerfile"),
+            "-t", f"{IMAGE_NAME}:{tag}",
+            str(REPO_ROOT),
+        ])
+        elapsed = time.monotonic() - start
+        log.info("Built: %s:%s in %dm %ds", IMAGE_NAME, tag, elapsed // 60, elapsed % 60)
 
         if push:
             self.login(username=username, registry=registry)
-            image_owner = os.environ.get("GHCR_IMAGE_OWNER") or GHCR_IMAGE_OWNER
-            image_name = IMAGE_NAME.split("/")[-1]
-            remote = f"{registry}/{image_owner}/{image_name}:{tag}"
-            # buildx --push produces OCI-format layers required by Modal's umoci.
-            # --platform is omitted: on Linux x86_64 the native platform is already
-            # linux/amd64; it is only needed when cross-compiling on Apple Silicon.
-            self._run([
-                "docker", "buildx", "build",
-                "-f", str(REPO_ROOT / "cloud" / "Dockerfile"),
-                "-t", f"{IMAGE_NAME}:{tag}",
-                "-t", remote,
-                "--push",
-                str(REPO_ROOT),
-            ])
-            # Pull back locally so run_local / dev work without a separate build.
-            self._run(["docker", "pull", remote])
-            self._run(["docker", "tag", remote, f"{IMAGE_NAME}:{tag}"])
-            log.info("Pushed (OCI): %s", remote)
-        else:
-            self._run([
-                "docker", "build",
-                "--platform", DOCKER_PLATFORM,
-                "-f", str(REPO_ROOT / "cloud" / "Dockerfile"),
-                "-t", f"{IMAGE_NAME}:{tag}",
-                str(REPO_ROOT),
-            ])
-
-        elapsed = time.monotonic() - start
-        log.info("Built: %s:%s in %dm %ds", IMAGE_NAME, tag, elapsed // 60, elapsed % 60)
+            self.push_docker(tag=tag, username=username, registry=registry)
 
     def _github_username(self, username: str = None) -> str:
         resolved = username or os.environ.get("GITHUB_USERNAME")
@@ -129,7 +104,12 @@ class DevTools:
         log.info("Logged in to %s as %s", registry, username)
 
     def push_docker(self, tag: str, username: str = None, owner: str = None, registry: str = "ghcr.io") -> None:
-        """Tag the local image and push it to the registry.
+        """Tag the local image and push it to the registry in OCI format.
+
+        Uses skopeo (if available) to push OCI-format layers, which are required
+        by Modal's umoci image builder. Falls back to docker push (Docker format)
+        with a warning when skopeo is not installed.
+
         username: your GitHub username for auth (GITHUB_USERNAME env var)
         owner:    GitHub username to push under (GHCR_IMAGE_OWNER env var) — defaults to username
         """
@@ -137,8 +117,23 @@ class DevTools:
         image_owner = owner or os.environ.get("GHCR_IMAGE_OWNER") or GHCR_IMAGE_OWNER
         image_name = IMAGE_NAME.split("/")[-1]
         remote = f"{registry}/{image_owner}/{image_name}:{tag}"
-        self._run(["docker", "tag", f"{IMAGE_NAME}:{tag}", remote])
-        self._run(["docker", "push", remote])
+        local = f"{IMAGE_NAME}:{tag}"
+
+        if shutil.which("skopeo"):
+            # skopeo reads credentials from ~/.docker/config.json (populated by docker login)
+            self._run([
+                "skopeo", "copy", "--format", "oci",
+                f"docker-daemon:{local}",
+                f"docker://{remote}",
+            ])
+        else:
+            log.warning(
+                "skopeo not found — pushing with docker push (Docker format). "
+                "Modal may reject the image. Install skopeo for OCI-format push."
+            )
+            self._run(["docker", "tag", local, remote])
+            self._run(["docker", "push", remote])
+
         log.info("Pushed: %s", remote)
 
     def pull_docker(self, tag: str, username: str = None, owner: str = None, registry: str = "ghcr.io") -> None:
