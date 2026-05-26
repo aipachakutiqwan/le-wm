@@ -31,6 +31,7 @@ stage2:
   lr: 1e-4
   n_epochs: 50
   freeze_encoder: True    # keep E and P^(1) frozen; only A_ψ and P^(2) are trained
+  log_every_n_steps: 10   # W&B step-level logging frequency; epoch summary always logged
 
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.

@@ -409,6 +409,7 @@ def train_hierarchical_lewm(
     n_epochs: int = 10,
     device: str = "cuda",
     freeze_encoder: bool = True,
+    log_every_n_steps: int = 10,
     wandb_run=None,
 ) -> HierarchicalLeWM:
     """Jointly optimise A_ψ and P^(2) on L_tf (stage 2).
@@ -419,13 +420,14 @@ def train_hierarchical_lewm(
 
     Parameters
     ----------
-    model          : HierarchicalLeWM with a stage-1-trained inner jepa
-    dataloader     : yields batches with 'pixels' and 'action' keys
-    n_waypoints    : N interior waypoints per trajectory (HWM default 3)
-    lr             : AdamW learning rate for stage-2 parameters
-    n_epochs       : number of stage-2 epochs
-    device         : target device string
-    freeze_encoder : if True, no gradients flow through E or P^(1)
+    model               : HierarchicalLeWM with a stage-1-trained inner jepa
+    dataloader          : yields batches with 'pixels' and 'action' keys
+    n_waypoints         : N interior waypoints per trajectory (HWM default 3)
+    lr                  : AdamW learning rate for stage-2 parameters
+    n_epochs            : number of stage-2 epochs
+    device              : target device string
+    freeze_encoder      : if True, no gradients flow through E or P^(1)
+    log_every_n_steps   : W&B step-level logging frequency (epoch summary always logged)
     """
     model = model.to(device)
 
@@ -441,6 +443,7 @@ def train_hierarchical_lewm(
             p.requires_grad_(False)
 
     model.train()
+    global_step = 0
     for epoch in range(n_epochs):
         epoch_loss = epoch_pred = epoch_var = 0.0
         for batch in dataloader:
@@ -456,9 +459,21 @@ def train_hierarchical_lewm(
             optimizer.zero_grad()
             out["loss"].backward()
             optimizer.step()
-            epoch_loss += out["loss"].item()
-            epoch_pred += out["loss_pred"].item()
-            epoch_var  += out["loss_var"].item()
+
+            loss_val = out["loss"].item()
+            pred_val = out["loss_pred"].item()
+            var_val  = out["loss_var"].item()
+            epoch_loss += loss_val
+            epoch_pred += pred_val
+            epoch_var  += var_val
+            global_step += 1
+
+            if wandb_run is not None and global_step % log_every_n_steps == 0:
+                wandb_run.log({
+                    "stage2/loss":      loss_val,
+                    "stage2/loss_pred": pred_val,
+                    "stage2/loss_var":  var_val,
+                }, step=global_step)
 
         n = len(dataloader)
         print(
@@ -467,9 +482,10 @@ def train_hierarchical_lewm(
         )
         if wandb_run is not None:
             wandb_run.log({
-                "stage2/loss":      epoch_loss / n,
-                "stage2/loss_pred": epoch_pred / n,
-                "stage2/loss_var":  epoch_var  / n,
-            }, step=epoch + 1)
+                "stage2/epoch_loss":      epoch_loss / n,
+                "stage2/epoch_loss_pred": epoch_pred / n,
+                "stage2/epoch_loss_var":  epoch_var  / n,
+                "stage2/epoch":           epoch + 1,
+            }, step=global_step)
 
     return model

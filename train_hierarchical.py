@@ -127,6 +127,7 @@ def run(cfg):
         n_epochs=cfg.stage2.n_epochs,
         device=device,
         freeze_encoder=cfg.stage2.freeze_encoder,
+        log_every_n_steps=cfg.stage2.log_every_n_steps,
         wandb_run=wandb_run,
     )
 
