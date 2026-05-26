@@ -123,7 +123,7 @@ def plan(
 
     # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
-    std_act = torch.full((h_low, model.action_dim), 0.1, device=device)
+    std_act = torch.full((h_low, model.action_dim), 0.5, device=device)
 
     def inner_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, h_low, action_dim)
