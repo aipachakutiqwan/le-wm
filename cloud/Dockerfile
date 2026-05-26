@@ -41,4 +41,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Dataset volume is mounted here at runtime (Modal / S3 / GCS)
 ENV STABLEWM_HOME=/stablewm-home
 
-ENTRYPOINT ["python", "train.py"]
+# ENTRYPOINT is python only — Modal appends its own module (modal._container_entrypoint)
+# and run_local / run_hierarchical_local pass the script name as the first argument.
+ENTRYPOINT ["python"]
+CMD ["train.py"]
