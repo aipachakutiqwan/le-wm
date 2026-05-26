@@ -49,7 +49,7 @@ wm:
   embed_dim: 192          # must match the stage-1 embed_dim
   n_waypoints: 2          # N interior waypoints → n_seg = N+1 = 3 = H_high (eval)
   latent_action_dim: 4    # d_L — sweep this first when tuning
-  lambda_sigreg: 0.09      # SIGReg weight on P^(2) predicted waypoints (0 = disabled)
+  lambda_sigreg: 0.02      # SIGReg weight on P^(2) predicted waypoints (0 = disabled)
                           # enables: 0.01–0.1; keeps predicted subgoals in Gaussian support
   high_depth: 6
   high_heads: 16

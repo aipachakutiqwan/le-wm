@@ -85,7 +85,17 @@ class HierarchicalStage2Module(pl.LightningModule):
             list(self.model.action_encoder_high.parameters())
             + list(self.model.high_predictor.parameters())
         )
-        return torch.optim.AdamW(params, lr=self.cfg.stage2.lr)
+        opt = torch.optim.AdamW(params, lr=self.cfg.stage2.lr)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            opt,
+            max_lr=self.cfg.stage2.lr,
+            total_steps=self.trainer.estimated_stepping_batches,
+            pct_start=0.05,       # 5% warmup
+            anneal_strategy="cos",
+            final_div_factor=100, # lr decays to max_lr / 100
+        )
+        return {"optimizer": opt, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
