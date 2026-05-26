@@ -41,7 +41,8 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Dataset volume is mounted here at runtime (Modal / S3 / GCS)
 ENV STABLEWM_HOME=/stablewm-home
 
-# ENTRYPOINT is python only — Modal appends its own module (modal._container_entrypoint)
-# and run_local / run_hierarchical_local pass the script name as the first argument.
-ENTRYPOINT ["python"]
-CMD ["train.py"]
+# No ENTRYPOINT — Modal overrides CMD but not ENTRYPOINT when launching containers
+# from a registry image, so any ENTRYPOINT here gets prepended to Modal's own
+# `python -m modal._container_entrypoint ...` bootstrap and breaks startup.
+# Local docker callers pass `python <script>` explicitly (see devtools.py).
+CMD ["python", "train.py"]

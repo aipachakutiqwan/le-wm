@@ -171,7 +171,7 @@ class DevTools:
 
     def run_local(self, tag: str, data: str = "tworoom", setup: str = None, overrides: list = None) -> None:
         """Run training locally inside the Docker container."""
-        cmd = ["docker", "run"] + self._base_run_flags() + [f"{IMAGE_NAME}:{tag}", "train.py", f"data={data}"]
+        cmd = ["docker", "run"] + self._base_run_flags() + [f"{IMAGE_NAME}:{tag}", "python", "train.py", f"data={data}"]
         if setup:
             cmd += [f"setup={setup}"]
         if overrides:
