@@ -59,9 +59,9 @@ wm:
   action_enc_depth: 2
   action_enc_heads: 4
 
-# Stage-2 window aligned to eval planning horizon: H_high * h_low = 3 * 10 = 30 frames.
-# Ensures each training segment (~10 steps) matches the low-level CEM rollout length.
-stage2_num_steps: 30
+# Dataset trajectories are 20 steps; with n_waypoints=2 (n_seg=3=H_high) each segment
+# is ~7 steps. Ideal alignment (H_high * h_low = 30) requires longer trajectories.
+stage2_num_steps: 20
 
 wandb:
   enabled: True
