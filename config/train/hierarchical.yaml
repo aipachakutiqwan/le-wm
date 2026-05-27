@@ -33,6 +33,16 @@ stage2:
   freeze_encoder: True    # keep E and P^(1) frozen; only A_ψ and P^(2) are trained
   log_every_n_steps: 10   # W&B step-level logging frequency; epoch summary always logged
   ckpt_every_n_epochs: 1  # pickle the model object every N epochs (1 = every epoch)
+  # Multi-step rollout (scheduled sampling) for P^(2). rollout_loss=False -> one-step
+  # teacher forcing (original behaviour). When True, the teacher-forcing probability is
+  # annealed ss_start -> ss_end over epochs so P^(2) is trained on its own rollouts and
+  # penalised for compounding error (the fix for the H>=2 fidelity collapse).
+  rollout_loss: False
+  ss_start: 1.0           # teacher-forcing prob at epoch 0 (1.0 = fully teacher-forced)
+  ss_end: 0.25            # teacher-forcing prob at final epoch (0.0 = full free-running)
+  # Regularisation for A_ψ / P^(2) (held-out TF loss 0.84 vs train 0.17 -> overfitting).
+  dropout: 0.0            # dropout inside A_ψ and P^(2) transformers
+  weight_decay: 0.01      # AdamW weight decay on stage-2 params (default 0.01)
 
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.

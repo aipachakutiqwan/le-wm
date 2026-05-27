@@ -107,6 +107,7 @@ def run(cfg):
         action_enc_hidden=cfg.wm.action_enc_hidden,
         action_enc_depth=cfg.wm.action_enc_depth,
         action_enc_heads=cfg.wm.action_enc_heads,
+        dropout=cfg.stage2.get("dropout", 0.0),
     )
 
     ##########################
@@ -145,6 +146,10 @@ def run(cfg):
         log_every_n_steps=cfg.stage2.log_every_n_steps,
         wandb_run=wandb_run,
         ckpt_callback=object_dump_callback,
+        rollout_loss=cfg.stage2.get("rollout_loss", False),
+        ss_start=cfg.stage2.get("ss_start", 1.0),
+        ss_end=cfg.stage2.get("ss_end", 0.25),
+        weight_decay=cfg.stage2.get("weight_decay", 0.01),
     )
 
     out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"

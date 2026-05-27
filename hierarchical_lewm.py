@@ -216,6 +216,7 @@ class HierarchicalLeWM(nn.Module):
     latent_action_dim : d_L — HWM default 4 (sweep this first when tuning)
     n_waypoints       : N interior waypoints per trajectory (HWM default 3)
     history_size      : low-level context window size (must match stage-1 training)
+    dropout           : dropout inside A_ψ and P^(2) transformers (0 = off)
     """
 
     def __init__(
@@ -237,6 +238,7 @@ class HierarchicalLeWM(nn.Module):
         action_enc_hidden: int = 128,
         action_enc_depth: int = 2,
         action_enc_heads: int = 4,
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.jepa = jepa
@@ -252,6 +254,7 @@ class HierarchicalLeWM(nn.Module):
             latent_action_dim=latent_action_dim,
             depth=action_enc_depth,
             heads=action_enc_heads,
+            dropout=dropout,
         )
 
         self.high_predictor = HighLevelPredictor(
@@ -262,6 +265,7 @@ class HierarchicalLeWM(nn.Module):
             depth=high_depth,
             heads=high_heads,
             mlp_dim=high_mlp_dim,
+            dropout=dropout,
         )
 
     def train(self, mode: bool = True):
@@ -283,19 +287,26 @@ class HierarchicalLeWM(nn.Module):
         obs: dict,
         waypoint_idx: torch.Tensor,
         freeze_encoder: bool = True,
+        teacher_forcing_prob: float = 1.0,
     ) -> dict:
-        """Teacher-forcing loss on waypoint latents (stage-2 objective).
+        """Stage-2 objective on waypoint latents.
 
-        L_tf = (1/N) Σ_k ‖ẑ_{t_{k+1}} − z_{t_{k+1}}‖_1
+        L = (1/N) Σ_k ‖ẑ_{t_{k+1}} − z_{t_{k+1}}‖²
 
         where ẑ_{t_{k+1}} = P^(2)((l_{t_i}, z_{t_i})_{i≤k}) and
               l_k = A_ψ(a_{t_k : t_{k+1}}).
 
         Parameters
         ----------
-        obs            : batch dict with 'pixels' (B,T,C,H,W) and 'action' (B,T,A)
-        waypoint_idx   : (W,) sorted frame indices; W = N_interior + 2
-        freeze_encoder : block gradients through E and P^(1) (recommended)
+        obs                  : batch dict with 'pixels' (B,T,C,H,W) and 'action' (B,T,A)
+        waypoint_idx         : (W,) sorted frame indices; W = N_interior + 2
+        freeze_encoder       : block gradients through E and P^(1) (recommended)
+        teacher_forcing_prob : 1.0 → one-step teacher forcing (each prediction conditions
+                               on the TRUE previous waypoints; fast parallel pass). < 1.0 →
+                               scheduled-sampling rollout: the model's own prediction is fed
+                               back as the next-step input with prob (1 - p), so it is trained
+                               on its autoregressive distribution and penalised for compounding
+                               error. Gradients flow through the fed-back predictions (BPTT).
 
         Returns
         -------
@@ -323,7 +334,26 @@ class HierarchicalLeWM(nn.Module):
         macro_actions = torch.stack(macro_list, dim=1)   # (B, n_seg, d_L)
 
         # P^(2): causal AR prediction — position k predicts waypoint k+1
-        pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
+        if teacher_forcing_prob >= 1.0:
+            # Fast parallel pass: every position conditions on the TRUE history.
+            pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
+        else:
+            # Scheduled-sampling rollout: build the history step-by-step, feeding back the
+            # model's own prediction (with prob 1 - teacher_forcing_prob) instead of truth.
+            preds = []
+            hist = wp_emb[:, :1]                              # (B, 1, D) — true z_0
+            for k in range(n_seg):
+                pred_next = self.high_predictor(hist, macro_actions[:, :k + 1])[:, -1:]
+                preds.append(pred_next)                       # predict z_{k+1}
+                if k < n_seg - 1:
+                    use_true = (
+                        torch.rand(pixels.shape[0], 1, 1, device=hist.device)
+                        < teacher_forcing_prob
+                    )
+                    next_in = torch.where(use_true, wp_emb[:, k + 1:k + 2], pred_next)
+                    hist = torch.cat([hist, next_in], dim=1)
+            pred_emb = torch.cat(preds, dim=1)                # (B, n_seg, D)
+
         target_emb = wp_emb[:, 1:].detach()                             # (B, n_seg, D)
 
         loss_pred = F.mse_loss(pred_emb, target_emb)
@@ -413,6 +443,10 @@ def train_hierarchical_lewm(
     log_every_n_steps: int = 10,
     wandb_run=None,
     ckpt_callback=None,
+    rollout_loss: bool = False,
+    ss_start: float = 1.0,
+    ss_end: float = 0.25,
+    weight_decay: float = 0.01,
 ) -> HierarchicalLeWM:
     """Jointly optimise A_ψ and P^(2) on L_tf (stage 2).
 
@@ -432,6 +466,13 @@ def train_hierarchical_lewm(
     device              : target device string
     freeze_encoder      : if True, no gradients flow through E or P^(1)
     log_every_n_steps   : W&B step-level logging frequency (epoch summary always logged)
+    rollout_loss        : enable multi-step scheduled-sampling rollout for P^(2). When
+                          False (default) training is pure one-step teacher forcing.
+    ss_start, ss_end    : teacher-forcing probability annealed linearly from ss_start
+                          (epoch 0) to ss_end (final epoch). 1.0 = teacher forcing, 0.0 =
+                          full free-running. Only used when rollout_loss=True. Validation
+                          always runs teacher-forced (p=1) for a stable, comparable metric.
+    weight_decay        : AdamW weight decay on the stage-2 params (A_ψ, P^(2)).
     ckpt_callback       : optional ModelObjectCallBack; if set, its save_epoch() is
                           called each epoch to pickle the model (same naming/location
                           convention as stage-1)
@@ -443,7 +484,7 @@ def train_hierarchical_lewm(
         list(model.action_encoder_high.parameters())
         + list(model.high_predictor.parameters())
     )
-    optimizer = torch.optim.AdamW(stage2_params, lr=lr)
+    optimizer = torch.optim.AdamW(stage2_params, lr=lr, weight_decay=weight_decay)
 
     if freeze_encoder:
         for p in model.jepa.parameters():
@@ -456,6 +497,13 @@ def train_hierarchical_lewm(
     best_ckpt_path = None
     best_metrics = None
     for epoch in range(n_epochs):
+        # Scheduled sampling: anneal teacher-forcing prob ss_start -> ss_end over epochs.
+        if rollout_loss:
+            frac = epoch / max(1, n_epochs - 1)
+            tf_prob = ss_start + (ss_end - ss_start) * frac
+        else:
+            tf_prob = 1.0
+
         epoch_loss = epoch_pred = epoch_var = 0.0
         for batch in dataloader:
             batch = {
@@ -465,7 +513,10 @@ def train_hierarchical_lewm(
             T = batch["pixels"].shape[1]
             wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
 
-            out = model.forward_high(batch, wp_idx, freeze_encoder=freeze_encoder)
+            out = model.forward_high(
+                batch, wp_idx, freeze_encoder=freeze_encoder,
+                teacher_forcing_prob=tf_prob,
+            )
 
             optimizer.zero_grad()
             out["loss"].backward()
@@ -492,6 +543,7 @@ def train_hierarchical_lewm(
             "stage2/epoch_loss_pred": epoch_pred / n,
             "stage2/epoch_loss_var":  epoch_var  / n,
             "stage2/epoch":           epoch + 1,
+            "stage2/tf_prob":         tf_prob,
         }
 
         val_str = ""
