@@ -238,6 +238,8 @@ class HierarchicalLeWM(nn.Module):
         action_enc_hidden: int = 128,
         action_enc_depth: int = 2,
         action_enc_heads: int = 4,
+        action_enc_dropout: float = 0.0,
+        high_dropout: float = 0.0,
     ):
         super().__init__()
         self.jepa = jepa
@@ -255,6 +257,7 @@ class HierarchicalLeWM(nn.Module):
             latent_action_dim=latent_action_dim,
             depth=action_enc_depth,
             heads=action_enc_heads,
+            dropout=action_enc_dropout,
         )
 
         self.high_predictor = HighLevelPredictor(
@@ -265,6 +268,7 @@ class HierarchicalLeWM(nn.Module):
             depth=high_depth,
             heads=high_heads,
             mlp_dim=high_mlp_dim,
+            dropout=high_dropout,
         )
 
     def train(self, mode: bool = True):

@@ -85,7 +85,8 @@ class HierarchicalStage2Module(pl.LightningModule):
             list(self.model.action_encoder_high.parameters())
             + list(self.model.high_predictor.parameters())
         )
-        opt = torch.optim.AdamW(params, lr=self.cfg.stage2.lr)
+        opt = torch.optim.AdamW(params, lr=self.cfg.stage2.lr,
+                                weight_decay=self.cfg.stage2.get("weight_decay", 0.01))
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             opt,
             max_lr=self.cfg.stage2.lr,
@@ -174,6 +175,8 @@ def run(cfg):
         action_enc_hidden=cfg.wm.action_enc_hidden,
         action_enc_depth=cfg.wm.action_enc_depth,
         action_enc_heads=cfg.wm.action_enc_heads,
+        action_enc_dropout=cfg.wm.get("action_enc_dropout", 0.0),
+        high_dropout=cfg.wm.get("high_dropout", 0.0),
     )
 
     total_params = sum(p.numel() for p in model.parameters())
