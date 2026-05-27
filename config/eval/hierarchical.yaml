@@ -12,7 +12,7 @@ world:
   env_name: swm/TwoRoom-v1
   num_envs: ${eval.num_eval}
   max_episode_steps: 500   # must be >= eval_budget (primitive steps)
-  history_size: 1
+  history_size: 3
   frame_skip: 1            # policy handles frameskip internally via action queue
 
 dataset:
@@ -23,12 +23,12 @@ dataset:
 
 # Two-level CEM hyperparameters (mirror defaults from hierarchical_plan.plan)
 plan:
-  H_high: 3
+  H_high: 1
   h_low: 10
   outer_samples: 512
   inner_samples: 256
   outer_iters: 5
-  inner_iters: 5
+  inner_iters: 30
 
 # MPC loop config fed to swm.PlanConfig
 plan_config:

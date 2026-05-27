@@ -24,16 +24,14 @@ from module import ARPredictor
 
 
 def sample_waypoints(T: int, N: int = 3, device=None) -> torch.Tensor:
-    """N random interior indices plus the two fixed endpoints [0, T-1].
+    """N+2 evenly-spaced waypoint indices across [0, T-1] (PLDM-style fixed stride).
 
-    Returns a sorted 1-D tensor of shape (N+2,).
-    Falls back to a full arange when N >= T-1 (very short trajectories).
+    Returns a sorted 1-D tensor of shape (N+2,) — endpoints always included.
+    Falls back to a full arange when N >= T-1.
     """
     if N >= T - 1:
         return torch.arange(T, device=device)
-    interior = torch.randperm(T - 2, device=device)[:N] + 1  # never 0 or T-1
-    endpoints = torch.tensor([0, T - 1], device=device)
-    return torch.cat([endpoints, interior]).sort().values
+    return torch.linspace(0, T - 1, N + 2, device=device).round().long()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -317,10 +315,17 @@ class HierarchicalLeWM(nn.Module):
         pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
         target_emb = wp_emb[:, 1:].detach()                             # (B, n_seg, D)
 
-        loss = F.l1_loss(pred_emb, target_emb)
+        tf_loss = F.l1_loss(pred_emb, target_emb)
+        # KL-to-N(0,I) approximation on deterministic A_ψ outputs: match first
+        # and second moments. Aligns macro-action distribution with the
+        # planner's CEM sampling prior.
+        kl_term = macro_actions.pow(2).mean() + (macro_actions.std(dim=(0, 1)) - 1).pow(2).mean()
+        loss = tf_loss + 0.01 * kl_term
 
         return {
             "loss": loss,
+            "tf_loss": tf_loss,
+            "kl_term": kl_term,
             "high_pred_emb": pred_emb,
             "high_target_emb": target_emb,
         }
@@ -410,6 +415,7 @@ def train_hierarchical_lewm(
         + list(model.high_predictor.parameters())
     )
     optimizer = torch.optim.AdamW(stage2_params, lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
 
     if freeze_encoder:
         for p in model.jepa.parameters():
@@ -434,8 +440,9 @@ def train_hierarchical_lewm(
             epoch_loss += out["loss"].item()
 
         avg_loss = epoch_loss / len(dataloader)
-        print(f"epoch {epoch + 1}/{n_epochs}  stage-2 L_tf: {avg_loss:.5f}")
+        scheduler.step()
+        print(f"epoch {epoch + 1}/{n_epochs}  stage-2 L_tf: {avg_loss:.5f}  lr: {scheduler.get_last_lr()[0]:.2e}")
         if wandb_run is not None:
-            wandb_run.log({"stage2/loss": avg_loss}, step=epoch + 1)
+            wandb_run.log({"stage2/loss": avg_loss, "stage2/lr": scheduler.get_last_lr()[0]}, step=epoch + 1)
 
     return model

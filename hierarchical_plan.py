@@ -50,7 +50,7 @@ def cem(
         elite_idx = costs.argsort()[:n_elites]
         elites = candidates[elite_idx]
         mu = elites.mean(0)
-        std = elites.std(0).clamp(min=1e-4)
+        std = elites.std(0).clamp(min=0.1)
     return mu
 
 
@@ -107,7 +107,7 @@ def plan(
 
     # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
     mu_mac = torch.zeros(H_high, d_L, device=device)
-    std_mac = torch.ones(H_high, d_L, device=device)
+    std_mac = torch.full((H_high, d_L), 5.0, device=device)
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, H_high, d_L)
@@ -123,7 +123,7 @@ def plan(
 
     # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
-    std_act = torch.full((h_low, model.action_dim), 0.1, device=device)
+    std_act = torch.full((h_low, model.action_dim), 1.0, device=device)
 
     def inner_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, h_low, action_dim)
