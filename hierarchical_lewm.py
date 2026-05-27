@@ -404,6 +404,7 @@ class HierarchicalLeWM(nn.Module):
 def train_hierarchical_lewm(
     model: HierarchicalLeWM,
     dataloader,
+    val_dataloader=None,
     n_waypoints: int = 3,
     lr: float = 1e-4,
     n_epochs: int = 10,
@@ -411,6 +412,7 @@ def train_hierarchical_lewm(
     freeze_encoder: bool = True,
     log_every_n_steps: int = 10,
     wandb_run=None,
+    ckpt_callback=None,
 ) -> HierarchicalLeWM:
     """Jointly optimise A_ψ and P^(2) on L_tf (stage 2).
 
@@ -422,12 +424,17 @@ def train_hierarchical_lewm(
     ----------
     model               : HierarchicalLeWM with a stage-1-trained inner jepa
     dataloader          : yields batches with 'pixels' and 'action' keys
+    val_dataloader      : optional held-out loader; if given, a no-grad pass runs
+                          each epoch and logs stage2/val_* metrics
     n_waypoints         : N interior waypoints per trajectory (HWM default 3)
     lr                  : AdamW learning rate for stage-2 parameters
     n_epochs            : number of stage-2 epochs
     device              : target device string
     freeze_encoder      : if True, no gradients flow through E or P^(1)
     log_every_n_steps   : W&B step-level logging frequency (epoch summary always logged)
+    ckpt_callback       : optional ModelObjectCallBack; if set, its save_epoch() is
+                          called each epoch to pickle the model (same naming/location
+                          convention as stage-1)
     """
     model = model.to(device)
 
@@ -444,6 +451,10 @@ def train_hierarchical_lewm(
 
     model.train()
     global_step = 0
+    best_val_loss = float("inf")
+    best_epoch = None
+    best_ckpt_path = None
+    best_metrics = None
     for epoch in range(n_epochs):
         epoch_loss = epoch_pred = epoch_var = 0.0
         for batch in dataloader:
@@ -476,16 +487,105 @@ def train_hierarchical_lewm(
                 }, step=global_step)
 
         n = len(dataloader)
+        epoch_metrics = {
+            "stage2/epoch_loss":      epoch_loss / n,
+            "stage2/epoch_loss_pred": epoch_pred / n,
+            "stage2/epoch_loss_var":  epoch_var  / n,
+            "stage2/epoch":           epoch + 1,
+        }
+
+        val_str = ""
+        if val_dataloader is not None and len(val_dataloader) > 0:
+            val_metrics = _validate_hierarchical(
+                model, val_dataloader, n_waypoints, freeze_encoder, device
+            )
+            epoch_metrics.update(val_metrics)
+            val_str = (
+                f"  | val_loss: {val_metrics['stage2/val_loss']:.5f}  "
+                f"val_pred: {val_metrics['stage2/val_loss_pred']:.5f}  "
+                f"val_var: {val_metrics['stage2/val_loss_var']:.5f}"
+            )
+
+            # Track the best model by val loss; keep one stable checkpoint on disk
+            # and defer the (single) W&B artifact upload to the end of training.
+            if val_metrics["stage2/val_loss"] < best_val_loss and ckpt_callback is not None:
+                best_val_loss = val_metrics["stage2/val_loss"]
+                best_epoch = epoch + 1
+                best_metrics = dict(val_metrics)
+                best_ckpt_path = ckpt_callback.save_best(model)
+                val_str += f"  (new best)"
+
         print(
             f"epoch {epoch + 1}/{n_epochs}  "
             f"loss: {epoch_loss/n:.5f}  pred: {epoch_pred/n:.5f}  var: {epoch_var/n:.5f}"
+            f"{val_str}"
         )
         if wandb_run is not None:
-            wandb_run.log({
-                "stage2/epoch_loss":      epoch_loss / n,
-                "stage2/epoch_loss_pred": epoch_pred / n,
-                "stage2/epoch_loss_var":  epoch_var  / n,
-                "stage2/epoch":           epoch + 1,
-            }, step=global_step)
+            wandb_run.log(epoch_metrics, step=global_step)
+
+        if ckpt_callback is not None:
+            ckpt_callback.save_epoch(model, epoch + 1)
+
+    if wandb_run is not None and best_ckpt_path is not None:
+        import wandb
+        artifact = wandb.Artifact(
+            name=ckpt_callback.filename,
+            type="model",
+            metadata={"val_loss": best_val_loss, "epoch": best_epoch},
+        )
+        artifact.add_file(str(best_ckpt_path))
+        wandb_run.log_artifact(artifact, aliases=["best"])
+        wandb_run.summary["stage2/best_val_loss"] = best_val_loss
+        wandb_run.summary["stage2/best_epoch"] = best_epoch
+        print(f"registered best model (epoch {best_epoch}, val_loss {best_val_loss:.5f}) to W&B")
+
+    if best_metrics is not None:
+        print(
+            f"best model — epoch {best_epoch}/{n_epochs}  "
+            f"val_loss: {best_metrics['stage2/val_loss']:.5f}  "
+            f"val_pred: {best_metrics['stage2/val_loss_pred']:.5f}  "
+            f"val_var: {best_metrics['stage2/val_loss_var']:.5f}  "
+            f"ckpt: {best_ckpt_path}"
+        )
 
     return model
+
+
+@torch.no_grad()
+def _validate_hierarchical(
+    model: HierarchicalLeWM,
+    val_dataloader,
+    n_waypoints: int,
+    freeze_encoder: bool,
+    device: str,
+) -> dict:
+    """One held-out pass computing the same teacher-forced losses, no grad/optim.
+
+    Waypoints use the deterministic fixed-stride sampler, so val loss is directly
+    comparable to train loss for the same T. eval() disables dropout in A_ψ / P^(2)
+    (the inner JEPA stays in eval regardless via the train() override).
+    """
+    was_training = model.training
+    model.eval()
+    val_loss = val_pred = val_var = 0.0
+    for batch in val_dataloader:
+        batch = {
+            k: v.to(device) if torch.is_tensor(v) else v
+            for k, v in batch.items()
+        }
+        T = batch["pixels"].shape[1]
+        wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
+        out = model.forward_high(batch, wp_idx, freeze_encoder=freeze_encoder)
+        val_loss += out["loss"].item()
+        val_pred += out["loss_pred"].item()
+        val_var  += out["loss_var"].item()
+
+    if was_training:
+        model.train()
+
+    nv = len(val_dataloader)
+    return {
+        "stage2/val_loss":      val_loss / nv,
+        "stage2/val_loss_pred": val_pred / nv,
+        "stage2/val_loss_var":  val_var  / nv,
+    }

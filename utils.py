@@ -43,18 +43,29 @@ class ModelObjectCallBack(Callback):
     def on_train_epoch_end(self, trainer, pl_module):
         super().on_train_epoch_end(trainer, pl_module)
 
-        output_path = (
-            self.dirpath
-            / f"{self.filename}_epoch_{trainer.current_epoch + 1}_object.ckpt"
-        )
-
         if trainer.is_global_zero:
-            if (trainer.current_epoch + 1) % self.epoch_interval == 0:
-                self._dump_model(pl_module.model, output_path)
+            self.save_epoch(pl_module.model, trainer.current_epoch + 1)
 
-            # save final epoch
+            # save final epoch even if it falls off the interval
             if (trainer.current_epoch + 1) == trainer.max_epochs:
-                self._dump_model(pl_module.model, output_path)
+                self.save_epoch(pl_module.model, trainer.current_epoch + 1, force=True)
+
+    def save_epoch(self, model, epoch: int, force: bool = False):
+        """Pickle the model object for a 1-indexed epoch, honouring epoch_interval.
+
+        Framework-agnostic — usable from a hand-rolled loop (stage-2) as well as
+        the Lightning callback hook (stage-1). Set force=True to ignore the interval.
+        """
+        if not force and epoch % self.epoch_interval != 0:
+            return
+        path = self.dirpath / f"{self.filename}_epoch_{epoch}_object.ckpt"
+        self._dump_model(model, path)
+
+    def save_best(self, model):
+        """Pickle the model to a stable best-checkpoint path (overwritten on improve)."""
+        path = self.dirpath / f"{self.filename}_best_object.ckpt"
+        self._dump_model(model, path)
+        return path
 
     def _dump_model(self, model, path):
         try:
