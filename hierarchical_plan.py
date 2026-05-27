@@ -26,8 +26,9 @@ def cem(
     n_samples: int = 512,
     n_iters: int = 5,
     elite_frac: float = 0.1,
+    var_ema: float = 0.0,
 ) -> torch.Tensor:
-    """Minimal diagonal-Gaussian Cross-Entropy Method.
+    """Diagonal-Gaussian Cross-Entropy Method with optional variance EMA.
 
     Parameters
     ----------
@@ -37,20 +38,28 @@ def cem(
     n_samples  : number of candidates sampled per iteration
     n_iters    : number of CEM iterations
     elite_frac : fraction of candidates kept as elites
+    var_ema    : exponential moving average coefficient for variance update.
+                 0.0 = no EMA (recompute from elites each iteration).
+                 >0 = var = var_ema * var_prev + (1-var_ema) * elite_var.
+                 Prevents premature variance collapse; paper (HWM) uses 0.9 (outer)
+                 and 0.8 (inner) for Push-T, 0.65/0.25 for Franka.
 
     Returns
     -------
     (*shape,) optimised mean
     """
     n_elites = max(1, int(n_samples * elite_frac))
+    var = std ** 2
     for _ in range(n_iters):
         eps = torch.randn(n_samples, *mu.shape, device=mu.device)
-        candidates = mu.unsqueeze(0) + std.unsqueeze(0) * eps   # (S, *shape)
-        costs = cost_fn(candidates)                              # (S,)
+        candidates = mu.unsqueeze(0) + std.unsqueeze(0) * eps      # (S, *shape)
+        costs = cost_fn(candidates)                                  # (S,)
         elite_idx = costs.argsort()[:n_elites]
         elites = candidates[elite_idx]
         mu = elites.mean(0)
-        std = elites.std(0).clamp(min=1e-4)
+        elite_var = elites.var(0, unbiased=False).clamp(min=1e-8)
+        var = var_ema * var + (1.0 - var_ema) * elite_var           # EMA update
+        std = var.sqrt().clamp(min=1e-4)
     return mu
 
 
@@ -65,69 +74,60 @@ def plan(
     z_init: torch.Tensor,
     z_goal: torch.Tensor,
     H_high: int = 3,
-    h_low: int = 10,
-    outer_samples: int = 512,
-    inner_samples: int = 256,
-    outer_iters: int = 5,
-    inner_iters: int = 5,
+    h_low: int = 5,
+    outer_samples: int = 1200,
+    inner_samples: int = 1200,
+    outer_iters: int = 20,
+    inner_iters: int = 20,
+    outer_var_ema: float = 0.9,
+    inner_var_ema: float = 0.8,
 ) -> torch.Tensor:
-    """Two-level CEM-MPC. Returns the first primitive action to execute.
+    """Two-level CEM-MPC matching the HWM paper (arXiv 2604.03208).
 
-    Outer CEM
-    ---------
-    Optimises H_high latent macro-actions in R^{H_high × d_L} by minimising
-    the L1 distance between the final P^(2) rollout state and z_goal.
-
-    Inner CEM
-    ---------
-    Given the first subgoal from the winning macro-action sequence, optimises
-    h_low primitive actions by minimising the L1 distance between the final
-    P^(1) rollout state and that subgoal.
-
-    Call this every K steps and re-plan with the updated observation (MPC loop).
+    Outer CEM  — E_2(l̂_{1:H}; z_1, z_g) = ‖z_g - P^(2)(l̂_{1:H}; z_1)‖_1
+    Inner CEM  — E_1(â_{1:h}; z_1, z̃_1) = ‖z̃_1 - P^(1)(â_{1:h}; z_1)‖_1
 
     Parameters
     ----------
-    model          : trained HierarchicalLeWM
-    z_init         : (D,) current latent state
-    z_goal         : (D,) goal latent state
-    H_high         : number of high-level macro-action steps
-    h_low          : number of low-level primitive steps per subgoal
-    outer_samples  : CEM sample count for the outer loop
-    inner_samples  : CEM sample count for the inner loop
-    outer_iters    : CEM iterations for the outer loop
-    inner_iters    : CEM iterations for the inner loop
+    model           : trained HierarchicalLeWM
+    z_init          : (D,) current latent state
+    z_goal          : (D,) goal latent state
+    H_high          : high-level horizon (number of macro-action steps)
+    h_low           : low-level horizon (primitive steps per subgoal segment)
+    outer_samples   : CEM sample count for the outer loop
+    inner_samples   : CEM sample count for the inner loop
+    outer_iters     : CEM iterations for the outer loop
+    inner_iters     : CEM iterations for the inner loop
+    outer_var_ema   : variance EMA for outer CEM (paper Push-T: 0.9)
+    inner_var_ema   : variance EMA for inner CEM (paper Push-T: 0.8)
 
     Returns
     -------
-    (action_dim,) — first effective action to execute (action_dim = frameskip * base_dim)
+    (action_dim,) — first effective action (action_dim = frameskip * base_dim)
     """
     device = z_init.device
     d_L = model.latent_action_dim
 
     # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
+    # Cost = E_2 = ‖z_g - P^(2)(l̂_{1:H}; z_1)‖_1  (paper eq., final subgoal only)
     mu_mac = torch.zeros(H_high, d_L, device=device)
     std_mac = torch.ones(H_high, d_L, device=device)
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, H_high, d_L)
-        subgoals = model._rollout_high(z_init, candidates)          # (S, H_high, D)
-        # Linearly increasing weights: later subgoals penalised more for being far from goal.
-        # This encourages progressive approach (z_1 < z_2 < z_last in distance to goal)
-        # while still prioritising the final subgoal landing near z_goal.
-        H = subgoals.shape[1]
-        w = torch.linspace(1.0 / H, 1.0, H, device=device)         # (H,) e.g. [0.33, 0.67, 1.0]
-        w = w / w.sum()                                              # normalise to sum=1
-        dists = (subgoals - z_goal.unsqueeze(0).unsqueeze(1)).abs().sum(-1)  # (S, H)
-        return (dists * w.unsqueeze(0)).sum(-1)                      # (S,)
+        subgoals = model._rollout_high(z_init, candidates)     # (S, H_high, D)
+        z_last = subgoals[:, -1]                               # (S, D)
+        return (z_last - z_goal.unsqueeze(0)).abs().sum(-1)    # (S,)
 
-    best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
+    best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters,
+                   var_ema=outer_var_ema)
     # best_mac: (H_high, d_L)
 
     # ── Derive first subgoal ──────────────────────────────────────────────────
     z_sg = model._rollout_high(z_init, best_mac.unsqueeze(0))[:, 0].squeeze(0)  # (D,)
 
     # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
+    # Cost = E_1 = ‖z̃_1 - P^(1)(â_{1:h}; z_1)‖_1  (paper eq.)
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
     std_act = torch.full((h_low, model.action_dim), 0.5, device=device)
 
@@ -136,7 +136,8 @@ def plan(
         z_final = model._rollout_low(z_init, candidates)       # (S, D)
         return (z_final - z_sg.unsqueeze(0)).abs().sum(-1)     # (S,)
 
-    best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters)
+    best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters,
+                   var_ema=inner_var_ema)
     # best_act: (h_low, action_dim)
 
     return best_act[0]   # (action_dim,) — effective action covering frameskip primitive steps
