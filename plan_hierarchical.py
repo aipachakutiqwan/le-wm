@@ -138,10 +138,13 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             if self._frameskip is None:
                 self._frameskip = eff.shape[-1] // base_dim
             fs = self._frameskip
-            # reshape to (E * fs, base_dim), inverse-transform, reshape to (fs, E, base_dim)
-            prim = eff.reshape(n_envs * fs, base_dim)
-            prim = scaler.inverse_transform(prim)
-            prim = prim.reshape(fs, n_envs, base_dim)
+            # eff[e] is [prim_0, prim_1, ..., prim_{fs-1}] concatenated. Split per env
+            # first (E, fs, base), inverse-transform per row, then transpose to
+            # (fs, E, base) so prim[t, e] is env e's t-th primitive. Reshaping straight
+            # from (E*fs, base) to (fs, E, base) scrambles primitives across envs.
+            prim = eff.reshape(n_envs, fs, base_dim)
+            prim = scaler.inverse_transform(prim.reshape(-1, base_dim))
+            prim = prim.reshape(n_envs, fs, base_dim).transpose(1, 0, 2)
         else:
             base_dim = eff.shape[-1]
             if self._frameskip is None:
@@ -270,6 +273,12 @@ def run(cfg: DictConfig):
     if len(eval_episodes) < cfg.eval.num_eval:
         raise ValueError("Not enough episodes with sufficient length for evaluation.")
 
+    # Initial agent-to-goal distance per episode. Goal is the demo's pos_agent
+    # goal_offset_steps later (same episode — guaranteed by the max_start filter).
+    start_pos = np.asarray(dataset.get_row_data(chosen)["pos_agent"])
+    goal_pos = np.asarray(dataset.get_row_data(chosen + cfg.eval.goal_offset_steps)["pos_agent"])
+    init_dist = np.linalg.norm(start_pos - goal_pos, axis=-1)
+
     ##########################
     ##      evaluation      ##
     ##########################
@@ -291,6 +300,21 @@ def run(cfg: DictConfig):
 
     py_log.info("metrics: %s", metrics)
     py_log.info("evaluation time: %.1f s", elapsed)
+
+    # Per-episode breakdown: does success correlate with starting near the goal?
+    # If successes are concentrated at small init_dist, the 20% is "free" (the planner
+    # isn't earning it) — points to a model/execution problem rather than weak search.
+    succ = np.asarray(metrics.get("episode_successes"))
+    if succ is not None and succ.shape == init_dist.shape:
+        order = np.argsort(init_dist)
+        py_log.info("per-episode (sorted by initial distance to goal):")
+        for j in order:
+            py_log.info("  ep=%-5s init_dist=%.3f  success=%s",
+                        int(eval_episodes[j]), float(init_dist[j]), bool(succ[j]))
+        if succ.any():
+            py_log.info("mean init_dist | success=%.3f  fail=%.3f",
+                        float(init_dist[succ].mean()),
+                        float(init_dist[~succ].mean()) if (~succ).any() else float("nan"))
 
     out = results_path / cfg.output.filename
     out.parent.mkdir(parents=True, exist_ok=True)
