@@ -292,6 +292,7 @@ class HierarchicalLeWM(nn.Module):
         obs: dict,
         waypoint_idx: torch.Tensor,
         freeze_encoder: bool = True,
+        ss_prob: float = 0.0,
     ) -> dict:
         """Teacher-forcing loss on waypoint latents (stage-2 objective).
 
@@ -305,6 +306,11 @@ class HierarchicalLeWM(nn.Module):
         obs            : batch dict with 'pixels' (B,T,C,H,W) and 'action' (B,T,A)
         waypoint_idx   : (W,) sorted frame indices; W = N_interior + 2
         freeze_encoder : block gradients through E and P^(1) (recommended)
+        ss_prob        : scheduled-sampling probability — at each AR step, replace the
+                         ground-truth input with the model's own previous prediction with
+                         this probability.  0.0 = pure teacher forcing (original behaviour);
+                         1.0 = fully autoregressive (identical to eval rollout).
+                         Ramp from 0 → ss_max_prob over training to close the train/eval gap.
 
         Returns
         -------
@@ -331,9 +337,30 @@ class HierarchicalLeWM(nn.Module):
 
         macro_actions = torch.stack(macro_list, dim=1)   # (B, n_seg, d_L)
 
-        # P^(2): causal AR prediction — position k predicts waypoint k+1
-        pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
-        target_emb = wp_emb[:, 1:].detach()                             # (B, n_seg, D)
+        # P^(2): causal AR prediction — position k predicts waypoint k+1.
+        # With ss_prob > 0 (scheduled sampling), each AR step feeds back the model's
+        # own prediction instead of the ground truth with probability ss_prob.
+        # This matches the autoregressive rollout used at eval time.
+        if ss_prob <= 0.0:
+            # Pure teacher forcing — efficient single forward pass.
+            pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
+        else:
+            # Scheduled sampling — step-by-step, same pattern as _rollout_high.
+            preds = []
+            z_seq = wp_emb[:, :1]                                    # (B, 1, D) — ground truth z_0
+            for k in range(n_seg):
+                pred_k = self.high_predictor(
+                    z_seq, macro_actions[:, : k + 1]
+                )[:, -1:]                                             # (B, 1, D)
+                preds.append(pred_k)
+                if k < n_seg - 1:
+                    # Bernoulli draw: use model prediction or ground truth for next input.
+                    use_pred = torch.rand(1, device=wp_emb.device).item() < ss_prob
+                    next_z = pred_k.detach() if use_pred else wp_emb[:, k + 1 : k + 2]
+                    z_seq = torch.cat([z_seq, next_z], dim=1)        # (B, k+2, D)
+            pred_emb = torch.cat(preds, dim=1)                       # (B, n_seg, D)
+
+        target_emb = wp_emb[:, 1:].detach()                         # (B, n_seg, D)
 
         loss_tf = F.l1_loss(pred_emb, target_emb)
 

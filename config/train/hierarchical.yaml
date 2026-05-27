@@ -41,6 +41,8 @@ stage2:
   weight_decay: 0.05      # AdamW weight decay; helps close the train/val gap
   n_epochs: 50
   freeze_encoder: True    # keep E and P^(1) frozen; only A_ψ and P^(2) are trained
+  ss_max_prob: 0.5        # scheduled sampling: max probability of feeding back own prediction
+  ss_ramp_epochs: 30      # linearly ramp ss_prob from 0 → ss_max_prob over first 30 epochs
 
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.
@@ -62,9 +64,10 @@ wm:
   action_enc_heads: 4
   action_enc_dropout: 0.1 # dropout in A_ψ — same purpose
 
-# Dataset trajectories are 20 steps; with n_waypoints=2 (n_seg=3=H_high) each segment
-# is ~7 steps. Ideal alignment (H_high * h_low = 30) requires longer trajectories.
-stage2_num_steps: 20
+# Trajectory length = H_high × h_low + 1 = 3 × 5 + 1 = 16.
+# Gives waypoints [0, 5, 10, 15] → three perfectly equal segments of 5 steps,
+# matching h_low=5 in the eval planner exactly.
+stage2_num_steps: 16
 
 wandb:
   enabled: True

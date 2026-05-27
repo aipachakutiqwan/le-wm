@@ -58,19 +58,31 @@ class HierarchicalStage2Module(pl.LightningModule):
             for p in self.model.jepa.parameters():
                 p.requires_grad_(False)
 
-    def _step(self, batch):
+    def _step(self, batch, train: bool = False):
         T = batch["pixels"].shape[1]
         wp_idx = sample_waypoints(T, N=self.cfg.wm.n_waypoints, device=self.device)
+        ss_prob = 0.0
+        if train:
+            ss_max = self.cfg.stage2.get("ss_max_prob", 0.0)
+            if ss_max > 0.0:
+                ramp = self.cfg.stage2.get("ss_ramp_epochs", self.cfg.stage2.n_epochs)
+                ss_prob = ss_max * min(1.0, self.current_epoch / ramp)
         return self.model.forward_high(
-            batch, wp_idx, freeze_encoder=self.cfg.stage2.freeze_encoder
+            batch, wp_idx,
+            freeze_encoder=self.cfg.stage2.freeze_encoder,
+            ss_prob=ss_prob,
         )
 
     def training_step(self, batch, batch_idx):
-        out = self._step(batch)
+        out = self._step(batch, train=True)
         self.log("stage2/train_loss", out["loss"], on_step=True, on_epoch=True, sync_dist=True, prog_bar=True)
         self.log("stage2/train_loss_tf", out["loss_tf"], on_step=True, on_epoch=True, sync_dist=True)
         if self.cfg.wm.lambda_sigreg > 0.0:
             self.log("stage2/train_loss_reg", out["loss_reg"], on_step=True, on_epoch=True, sync_dist=True)
+        ss_max = self.cfg.stage2.get("ss_max_prob", 0.0)
+        if ss_max > 0.0 and batch_idx == 0:
+            ramp = self.cfg.stage2.get("ss_ramp_epochs", self.cfg.stage2.n_epochs)
+            self.log("stage2/ss_prob", ss_max * min(1.0, self.current_epoch / ramp), on_step=False, on_epoch=True)
         return out["loss"]
 
     def validation_step(self, batch, batch_idx):
