@@ -24,11 +24,11 @@ dataset:
 # Two-level CEM hyperparameters (mirror defaults from hierarchical_plan.plan)
 plan:
   H_high: 3
-  h_low: 10
+  h_low: 5           # matches flat LeWM horizon; halves inner search space (50-dim vs 100-dim)
   outer_samples: 512
-  inner_samples: 256
-  outer_iters: 5
-  inner_iters: 5
+  inner_samples: 512  # was 256; better coverage of 50-dim space
+  outer_iters: 10     # was 5; more outer CEM refinement
+  inner_iters: 20     # was 5; 20×512=10,240 evals ≈ flat's 30×300=9,000
 
 # MPC loop config fed to swm.PlanConfig
 plan_config:

@@ -111,9 +111,15 @@ def plan(
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, H_high, d_L)
-        subgoals = model._rollout_high(z_init, candidates)     # (S, H_high, D)
-        z_last = subgoals[:, -1]                               # (S, D)
-        return (z_last - z_goal.unsqueeze(0)).abs().sum(-1)    # (S,)
+        subgoals = model._rollout_high(z_init, candidates)          # (S, H_high, D)
+        # Linearly increasing weights: later subgoals penalised more for being far from goal.
+        # This encourages progressive approach (z_1 < z_2 < z_last in distance to goal)
+        # while still prioritising the final subgoal landing near z_goal.
+        H = subgoals.shape[1]
+        w = torch.linspace(1.0 / H, 1.0, H, device=device)         # (H,) e.g. [0.33, 0.67, 1.0]
+        w = w / w.sum()                                              # normalise to sum=1
+        dists = (subgoals - z_goal.unsqueeze(0).unsqueeze(1)).abs().sum(-1)  # (S, H)
+        return (dists * w.unsqueeze(0)).sum(-1)                      # (S,)
 
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
     # best_mac: (H_high, d_L)
