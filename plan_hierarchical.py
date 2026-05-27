@@ -65,12 +65,14 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self.transform = transform
         self.device = device
         self._action_queue: deque = deque()
-        # effective_action_dim = frameskip * base_action_dim; derived at first get_action call
         self._frameskip: int | None = None
+        # warm-start: store best macro-action from previous plan call per environment
+        self._prev_mac: list = []
 
     def set_env(self, env) -> None:
         self.env = env
         self._action_queue.clear()
+        self._prev_mac = []
 
     def _encode(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode pixel tensor to latent states.
@@ -114,9 +116,13 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         z_goal = self._encode(info_dict["goal"])     # (E, D)
 
         n_envs = z_init.shape[0]
+        if not self._prev_mac:
+            self._prev_mac = [None] * n_envs
+
         effective_actions = []
+        new_macs = []
         for i in range(n_envs):
-            a = plan(
+            a, mac = plan(
                 self.model,
                 z_init[i],
                 z_goal[i],
@@ -128,8 +134,16 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                 inner_iters=self.plan_cfg.inner_iters,
                 outer_var_ema=self.plan_cfg.get("outer_var_ema", 0.0),
                 inner_var_ema=self.plan_cfg.get("inner_var_ema", 0.0),
+                use_mppi=self.plan_cfg.get("use_mppi", True),
+                mppi_sigma_outer=self.plan_cfg.get("mppi_sigma_outer", 1.0),
+                mppi_sigma_inner=self.plan_cfg.get("mppi_sigma_inner", 0.5),
+                mppi_lam=self.plan_cfg.get("mppi_lam", 1.0),
+                inner_goal_alpha=self.plan_cfg.get("inner_goal_alpha", 0.0),
+                prev_mac=self._prev_mac[i],
             )
             effective_actions.append(a.cpu().numpy())
+            new_macs.append(mac)
+        self._prev_mac = new_macs
 
         # effective_actions: list of (effective_action_dim,) → stack to (E, eff_dim)
         eff = np.stack(effective_actions)

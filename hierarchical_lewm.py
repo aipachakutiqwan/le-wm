@@ -228,6 +228,7 @@ class HierarchicalLeWM(nn.Module):
         n_waypoints: int = 3,
         history_size: int = 3,
         lambda_sigreg: float = 0.0,
+        gamma_roll: float = 0.0,
         # high-level predictor knobs (mirror low-level defaults from train.py)
         high_depth: int = 6,
         high_heads: int = 16,
@@ -248,6 +249,7 @@ class HierarchicalLeWM(nn.Module):
         self.action_dim = action_dim
         self.history_size = history_size
         self.lambda_sigreg = lambda_sigreg
+        self.gamma_roll = gamma_roll
         if lambda_sigreg > 0.0:
             self.sigreg = SIGReg()
 
@@ -364,19 +366,42 @@ class HierarchicalLeWM(nn.Module):
 
         loss_tf = F.l1_loss(pred_emb, target_emb)
 
+        # Rollout loss (paper: L = γ_tf·L_tf + γ_roll·L_roll, γ_roll=1.0 for navigation).
+        # P^(2) is unrolled fully autoregressively — each step feeds back its own prediction
+        # with full backprop through the chain (no stop-gradient).  This trains the model
+        # in the same regime as eval rollout, directly closing the teacher-forcing gap.
+        if self.gamma_roll > 0.0:
+            preds_roll = []
+            z_seq_r = wp_emb[:, :1]                                  # (B, 1, D) — ground truth z_0
+            for k in range(n_seg):
+                pred_k = self.high_predictor(
+                    z_seq_r, macro_actions[:, : k + 1]
+                )[:, -1:]                                             # (B, 1, D)
+                preds_roll.append(pred_k)
+                if k < n_seg - 1:
+                    z_seq_r = torch.cat([z_seq_r, pred_k], dim=1)    # full backprop, no detach
+            pred_roll = torch.cat(preds_roll, dim=1)                 # (B, n_seg, D)
+            loss_roll = F.l1_loss(pred_roll, target_emb)
+        else:
+            loss_roll = pred_emb.new_zeros(1).squeeze()
+
         if self.lambda_sigreg > 0.0:
             # SIGReg on predicted waypoints keeps P^(2) outputs within the Gaussian
             # support of the real latent space, mitigating infeasible subgoals.
-            # SIGReg expects (T, B, D); pred_emb is (B, n_seg, D).
-            loss_reg = self.sigreg(pred_emb.permute(1, 0, 2))
-            loss = loss_tf + self.lambda_sigreg * loss_reg
+            # Use pred_roll when available — eval always runs AR, so regularising
+            # the AR path is more faithful than regularising the TF path.
+            # SIGReg expects (T, B, D); pred is (B, n_seg, D).
+            reg_input = pred_roll if self.gamma_roll > 0.0 else pred_emb
+            loss_reg = self.sigreg(reg_input.permute(1, 0, 2))
         else:
-            loss = loss_tf
             loss_reg = pred_emb.new_zeros(1).squeeze()
+
+        loss = loss_tf + self.gamma_roll * loss_roll + self.lambda_sigreg * loss_reg
 
         return {
             "loss": loss,
             "loss_tf": loss_tf,
+            "loss_roll": loss_roll,
             "loss_reg": loss_reg,
             "high_pred_emb": pred_emb,
             "high_target_emb": target_emb,

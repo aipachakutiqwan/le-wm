@@ -77,6 +77,8 @@ class HierarchicalStage2Module(pl.LightningModule):
         out = self._step(batch, train=True)
         self.log("stage2/train_loss", out["loss"], on_step=True, on_epoch=True, sync_dist=True, prog_bar=True)
         self.log("stage2/train_loss_tf", out["loss_tf"], on_step=True, on_epoch=True, sync_dist=True)
+        if self.cfg.wm.get("gamma_roll", 0.0) > 0.0:
+            self.log("stage2/train_loss_roll", out["loss_roll"], on_step=True, on_epoch=True, sync_dist=True)
         if self.cfg.wm.lambda_sigreg > 0.0:
             self.log("stage2/train_loss_reg", out["loss_reg"], on_step=True, on_epoch=True, sync_dist=True)
         ss_max = self.cfg.stage2.get("ss_max_prob", 0.0)
@@ -89,6 +91,8 @@ class HierarchicalStage2Module(pl.LightningModule):
         out = self._step(batch)
         self.log("stage2/val_loss", out["loss"], on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
         self.log("stage2/val_loss_tf", out["loss_tf"], on_step=False, on_epoch=True, sync_dist=True)
+        if self.cfg.wm.get("gamma_roll", 0.0) > 0.0:
+            self.log("stage2/val_loss_roll", out["loss_roll"], on_step=False, on_epoch=True, sync_dist=True)
         if self.cfg.wm.lambda_sigreg > 0.0:
             self.log("stage2/val_loss_reg", out["loss_reg"], on_step=False, on_epoch=True, sync_dist=True)
 
@@ -180,6 +184,7 @@ def run(cfg):
         n_waypoints=cfg.wm.n_waypoints,
         history_size=cfg.wm.history_size,
         lambda_sigreg=cfg.wm.lambda_sigreg,
+        gamma_roll=cfg.wm.get("gamma_roll", 0.0),
         high_depth=cfg.wm.high_depth,
         high_heads=cfg.wm.high_heads,
         high_mlp_dim=cfg.wm.high_mlp_dim,

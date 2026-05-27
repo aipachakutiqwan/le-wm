@@ -12,7 +12,7 @@ world:
   env_name: swm/TwoRoom-v1
   num_envs: ${eval.num_eval}
   max_episode_steps: ??? # set programmatically to 2 * eval_budget
-  history_size: 1
+  history_size: 3
   frame_skip: 1            # policy handles frameskip internally via action queue
 
 dataset:
@@ -23,21 +23,26 @@ dataset:
 
 # Two-level CEM hyperparameters (mirror defaults from hierarchical_plan.plan)
 plan:
-  H_high: 3
-  h_low: 5             # H_high × h_low + 1 = 16 = stage2_num_steps
-  outer_samples: 1200  # paper Push-T value
-  inner_samples: 1200  # paper Push-T value
-  outer_iters: 20      # paper Push-T value
-  inner_iters: 20      # paper Push-T value
-  outer_var_ema: 0.9   # paper Push-T: prevents outer CEM variance collapse
-  inner_var_ema: 0.8   # paper Push-T: prevents inner CEM variance collapse
+  H_high: 5
+  h_low: 3                  # H_high × h_low + 1 = 5 × 3 + 1 = 16 = stage2_num_steps
+  outer_samples: 2000        # paper Diverse Maze value
+  inner_samples: 1000        # paper Diverse Maze value
+  outer_iters: 10
+  inner_iters: 30
+  outer_var_ema: 0.9         # used only when use_mppi: false
+  inner_var_ema: 0.8         # used only when use_mppi: false
+  use_mppi: true             # paper algorithm for navigation tasks
+  mppi_sigma_outer: 1.0      # noise std for macro-action space (paper maze: 10; tune to cost scale)
+  mppi_sigma_inner: 0.5      # noise std for primitive action space
+  mppi_lam: 1.0              # temperature — scale-invariant (λ=1 → e^{-1} at 1σ above best)
+  inner_goal_alpha: 0.0     # auxiliary z_goal pull in inner cost (0 = disabled)
 
 # MPC loop config fed to swm.PlanConfig
 plan_config:
-  horizon: 5          # plan 1 high-level step per call (subgoal obtained internally)
-  receding_horizon: 5  # replan every primitive action
+  horizon: 3          # one high-level step = h_low=3 primitive actions
+  receding_horizon: 3  # replan every h_low steps (after queue drains)
   history_len: 1
-  action_block: 5     # 1 primitive action per plan call; frameskip handled by world.frame_skip
+  action_block: 3     # matches h_low; frameskip handled by world.frame_skip
 
 eval:
   num_eval: 50

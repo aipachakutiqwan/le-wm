@@ -64,7 +64,53 @@ def cem(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Two-level CEM-MPC
+# MPPI
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def mppi(
+    cost_fn,
+    mu: torch.Tensor,
+    sigma: float,
+    n_samples: int = 2000,
+    n_iters: int = 5,
+    lam: float = 1.0,
+) -> torch.Tensor:
+    """Model Predictive Path Integral optimiser (paper algorithm for navigation).
+
+    Unlike CEM (hard elite threshold), MPPI soft-weights ALL samples via
+    exp(−cost/λ).  Near-miss trajectories (e.g. almost through a doorway)
+    still contribute positively, giving smoother gradient signal near bottlenecks.
+
+    Parameters
+    ----------
+    cost_fn   : callable (n_samples, *shape) -> (n_samples,) — lower is better
+    mu        : (*shape,) initial mean
+    sigma     : fixed noise std — exploration scale (paper maze: 10 for high-level)
+    n_samples : trajectories per iteration (paper maze: 2000–4000)
+    n_iters   : refinement iterations
+    lam       : temperature — lower = greedier; calibrate to cost scale
+                (paper maze: 0.0025 for their latent space; start with ~1.0 here)
+
+    Returns
+    -------
+    (*shape,) optimised mean
+    """
+    for _ in range(n_iters):
+        noise = torch.randn(n_samples, *mu.shape, device=mu.device) * sigma
+        candidates = mu.unsqueeze(0) + noise                         # (S, *shape)
+        costs = cost_fn(candidates)                                   # (S,)
+        beta = costs.min()
+        # Normalise by std so λ is scale-invariant: e^{-1/λ} ≈ 0.37 at 1σ above best.
+        scale = costs.std().clamp(min=1e-6)
+        weights = torch.exp(-(costs - beta) / (scale * lam))         # (S,)
+        weights = weights / (weights.sum() + 1e-8)
+        mu = (weights.view(-1, *([1] * mu.dim())) * candidates).sum(0)
+    return mu
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Two-level CEM-MPC / MPPI
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -75,69 +121,93 @@ def plan(
     z_goal: torch.Tensor,
     H_high: int = 3,
     h_low: int = 5,
-    outer_samples: int = 1200,
-    inner_samples: int = 1200,
-    outer_iters: int = 20,
-    inner_iters: int = 20,
+    outer_samples: int = 2000,
+    inner_samples: int = 1000,
+    outer_iters: int = 10,
+    inner_iters: int = 10,
     outer_var_ema: float = 0.9,
     inner_var_ema: float = 0.8,
-) -> torch.Tensor:
-    """Two-level CEM-MPC matching the HWM paper (arXiv 2604.03208).
+    use_mppi: bool = True,
+    mppi_sigma_outer: float = 1.0,
+    mppi_sigma_inner: float = 0.5,
+    mppi_lam: float = 1.0,
+    inner_goal_alpha: float = 0.0,
+    prev_mac: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Two-level MPPI/CEM-MPC matching the HWM paper (arXiv 2604.03208).
 
-    Outer CEM  — E_2(l̂_{1:H}; z_1, z_g) = ‖z_g - P^(2)(l̂_{1:H}; z_1)‖_1
-    Inner CEM  — E_1(â_{1:h}; z_1, z̃_1) = ‖z̃_1 - P^(1)(â_{1:h}; z_1)‖_1
+    Outer  — E_2 = ‖z_g − P^(2)(l̂_{1:H}; z_1)‖_1  (paper eq., final subgoal)
+    Inner  — E_1 = ‖z̃_1 − P^(1)(â_{1:h}; z_1)‖_1  (paper eq.)
 
     Parameters
     ----------
-    model           : trained HierarchicalLeWM
-    z_init          : (D,) current latent state
-    z_goal          : (D,) goal latent state
-    H_high          : high-level horizon (number of macro-action steps)
-    h_low           : low-level horizon (primitive steps per subgoal segment)
-    outer_samples   : CEM sample count for the outer loop
-    inner_samples   : CEM sample count for the inner loop
-    outer_iters     : CEM iterations for the outer loop
-    inner_iters     : CEM iterations for the inner loop
-    outer_var_ema   : variance EMA for outer CEM (paper Push-T: 0.9)
-    inner_var_ema   : variance EMA for inner CEM (paper Push-T: 0.8)
+    model            : trained HierarchicalLeWM
+    z_init           : (D,) current latent state
+    z_goal           : (D,) goal latent state
+    H_high           : high-level horizon
+    h_low            : low-level horizon (primitive steps per segment)
+    outer_samples    : sample count for outer loop
+    inner_samples    : sample count for inner loop
+    outer_iters      : refinement iterations for outer loop
+    inner_iters      : refinement iterations for inner loop
+    outer_var_ema    : CEM variance EMA for outer loop (ignored when use_mppi=True)
+    inner_var_ema    : CEM variance EMA for inner loop (ignored when use_mppi=True)
+    use_mppi         : use MPPI (paper algorithm for navigation) instead of CEM
+    mppi_sigma_outer : MPPI noise std for outer loop (paper maze high-level: 10)
+    mppi_sigma_inner : MPPI noise std for inner loop (paper maze low-level: 5)
+    mppi_lam         : MPPI temperature — calibrate to cost scale (paper: 0.0025)
+    prev_mac         : (H_high, d_L) warm-start from previous plan's best macro-action.
+                       Shift by one: warm_mac[k] = prev_mac[k+1], warm_mac[-1] = 0.
+                       Pass the second return value of the previous plan() call.
 
     Returns
     -------
-    (action_dim,) — first effective action (action_dim = frameskip * base_dim)
+    best_act[0]  : (action_dim,) first effective action to execute
+    best_mac     : (H_high, d_L) optimal macro-action for warm-starting next call
     """
     device = z_init.device
     d_L = model.latent_action_dim
 
-    # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
-    # Cost = E_2 = ‖z_g - P^(2)(l̂_{1:H}; z_1)‖_1  (paper eq., final subgoal only)
-    mu_mac = torch.zeros(H_high, d_L, device=device)
-    std_mac = torch.ones(H_high, d_L, device=device)
+    # ── Outer loop: optimise macro-action sequence ────────────────────────────
+    # Warm start: shift previous macro-action by one step so the plan is consistent
+    # across replanning calls (common MPC technique — not in paper but standard practice).
+    if prev_mac is not None:
+        mu_mac = torch.cat([prev_mac[1:], torch.zeros(1, d_L, device=device)], dim=0)
+    else:
+        mu_mac = torch.zeros(H_high, d_L, device=device)
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
-        # candidates: (S, H_high, d_L)
         subgoals = model._rollout_high(z_init, candidates)     # (S, H_high, D)
         z_last = subgoals[:, -1]                               # (S, D)
         return (z_last - z_goal.unsqueeze(0)).abs().sum(-1)    # (S,)
 
-    best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters,
-                   var_ema=outer_var_ema)
-    # best_mac: (H_high, d_L)
+    if use_mppi:
+        best_mac = mppi(outer_cost, mu_mac, mppi_sigma_outer,
+                        outer_samples, outer_iters, mppi_lam)
+    else:
+        std_mac = torch.ones(H_high, d_L, device=device)
+        best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters,
+                       var_ema=outer_var_ema)
 
     # ── Derive first subgoal ──────────────────────────────────────────────────
     z_sg = model._rollout_high(z_init, best_mac.unsqueeze(0))[:, 0].squeeze(0)  # (D,)
 
-    # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
-    # Cost = E_1 = ‖z̃_1 - P^(1)(â_{1:h}; z_1)‖_1  (paper eq.)
+    # ── Inner loop: optimise primitive actions to reach z_sg ─────────────────
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
-    std_act = torch.full((h_low, model.action_dim), 0.5, device=device)
 
     def inner_cost(candidates: torch.Tensor) -> torch.Tensor:
-        # candidates: (S, h_low, action_dim)
-        z_final = model._rollout_low(z_init, candidates)       # (S, D)
-        return (z_final - z_sg.unsqueeze(0)).abs().sum(-1)     # (S,)
+        z_final = model._rollout_low(z_init, candidates)                           # (S, D)
+        cost = (z_final - z_sg.unsqueeze(0)).abs().sum(-1)                         # (S,)
+        if inner_goal_alpha > 0.0:
+            cost = cost + inner_goal_alpha * (z_final - z_goal.unsqueeze(0)).abs().sum(-1)
+        return cost
 
-    best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters,
-                   var_ema=inner_var_ema)
-    # best_act: (h_low, action_dim)
+    if use_mppi:
+        best_act = mppi(inner_cost, mu_act, mppi_sigma_inner,
+                        inner_samples, inner_iters, mppi_lam)
+    else:
+        std_act = torch.full((h_low, model.action_dim), 0.5, device=device)
+        best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters,
+                       var_ema=inner_var_ema)
 
-    return best_act[0]   # (action_dim,) — effective action covering frameskip primitive steps
+    return best_act[0], best_mac
