@@ -48,14 +48,14 @@ wm:
   history_size: 3
   embed_dim: 192          # must match the stage-1 embed_dim
   n_waypoints: 2          # N interior waypoints → n_seg = N+1 = 3 = H_high (eval)
-  latent_action_dim: 4    # d_L — sweep this first when tuning
+  latent_action_dim: 8    # d_L — doubled from 4; action_dim=2 * h_low=10 → 20 values → 8 dims
   lambda_sigreg: 0.02      # SIGReg weight on P^(2) predicted waypoints (0 = disabled)
                           # enables: 0.01–0.1; keeps predicted subgoals in Gaussian support
   high_depth: 6
   high_heads: 16
   high_mlp_dim: 2048
   high_num_frames: 8      # positional-embedding buffer; >= n_waypoints + 2
-  action_enc_hidden: 128
+  action_enc_hidden: 256  # doubled from 128; more capacity to encode 10-step chunks
   action_enc_depth: 2
   action_enc_heads: 4
 

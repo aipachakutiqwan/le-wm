@@ -100,7 +100,7 @@ def plan(
 
     Returns
     -------
-    (action_dim,) — first primitive action to execute
+    (action_dim,) — first effective action to execute (action_dim = frameskip * base_dim)
     """
     device = z_init.device
     d_L = model.latent_action_dim
@@ -133,4 +133,4 @@ def plan(
     best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters)
     # best_act: (h_low, action_dim)
 
-    return best_act[0]   # first primitive action: (action_dim,)
+    return best_act[0]   # (action_dim,) — effective action covering frameskip primitive steps
