@@ -126,6 +126,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                 inner_samples=self.plan_cfg.inner_samples,
                 outer_iters=self.plan_cfg.outer_iters,
                 inner_iters=self.plan_cfg.inner_iters,
+                inner_std=self.plan_cfg.get("inner_std", 0.5),
             )
             effective_actions.append(a.cpu().numpy())
 
@@ -241,13 +242,17 @@ def run(cfg: DictConfig):
     py_log.info("Loading checkpoint from %s", cfg.checkpoint)
     model = torch.load(cfg.checkpoint, map_location=cfg.device, weights_only=False)
 
-    policy = HierarchicalPolicy(
-        model=model,
-        plan_cfg=cfg.plan,
-        process=process,
-        transform=transform,
-        device=cfg.device,
-    )
+    if cfg.get("random_policy", False):
+        py_log.info("DIAGNOSTIC: using RandomPolicy (planner disabled)")
+        policy = swm.policy.RandomPolicy()
+    else:
+        policy = HierarchicalPolicy(
+            model=model,
+            plan_cfg=cfg.plan,
+            process=process,
+            transform=transform,
+            device=cfg.device,
+        )
 
     ##########################
     ##     episode sample   ##

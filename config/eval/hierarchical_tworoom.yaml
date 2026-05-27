@@ -8,6 +8,11 @@ device: cpu  # override with device=cuda when a GPU is available
 
 seed: 42
 
+# Diagnostic: replace the planner with random actions to measure the "free" success
+# rate (episodes starting near the goal). If planning ≈ random, the planner is not
+# contributing and the bug is in the model/execution, not the search.
+random_policy: false
+
 world:
   env_name: swm/TwoRoom-v1
   num_envs: ${eval.num_eval}
@@ -29,6 +34,7 @@ plan:
   inner_samples: 256
   outer_iters: 5
   inner_iters: 5
+  inner_std: 0.5     # initial inner-CEM std; match dataset action scale (~0.86), not 0.1
 
 # MPC loop config fed to swm.PlanConfig
 plan_config:

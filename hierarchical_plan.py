@@ -70,6 +70,7 @@ def plan(
     inner_samples: int = 256,
     outer_iters: int = 5,
     inner_iters: int = 5,
+    inner_std: float = 0.5,
 ) -> torch.Tensor:
     """Two-level CEM-MPC. Returns the first primitive action to execute.
 
@@ -97,6 +98,9 @@ def plan(
     inner_samples  : CEM sample count for the inner loop
     outer_iters    : CEM iterations for the outer loop
     inner_iters    : CEM iterations for the inner loop
+    inner_std      : initial CEM std for the inner (primitive-action) loop. Must
+                     roughly match the dataset action scale — too small (e.g. 0.1
+                     against std~0.86 actions) starves the search of exploration.
 
     Returns
     -------
@@ -123,7 +127,7 @@ def plan(
 
     # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
-    std_act = torch.full((h_low, model.action_dim), 0.1, device=device)
+    std_act = torch.full((h_low, model.action_dim), inner_std, device=device)
 
     def inner_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, h_low, action_dim)
