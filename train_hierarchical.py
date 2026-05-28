@@ -22,6 +22,7 @@ python train_hierarchical.py stage1_checkpoint=<path> \\
 import logging
 from functools import partial
 from pathlib import Path
+import time
 
 import hydra
 import lightning as pl
@@ -36,6 +37,31 @@ from hierarchical_lewm import HierarchicalLeWM, HierarchicalLeWMModule
 from utils import get_column_normalizer, get_img_preprocessor
 
 py_log = logging.getLogger(__name__)
+
+
+class EpochTimer(Callback):
+    """Log per-epoch wall time and total training time (rank 0 only)."""
+
+    def on_train_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        self._t_train = time.perf_counter()
+        self._t_epoch = self._t_train
+
+    def on_train_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        self._t_epoch = time.perf_counter()
+
+    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        if not trainer.is_global_zero:
+            return
+        epoch = trainer.current_epoch + 1
+        total = trainer.max_epochs
+        elapsed = time.perf_counter() - self._t_epoch
+        py_log.info("epoch %d/%d — %.1f s", epoch, total, elapsed)
+
+    def on_train_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        if not trainer.is_global_zero:
+            return
+        total = time.perf_counter() - self._t_train
+        py_log.info("training complete — total time: %.1f s (%.1f min)", total, total / 60)
 
 
 class EpochCheckpoint(Callback):
@@ -147,7 +173,7 @@ def run(cfg):
         **OmegaConf.to_container(cfg.trainer, resolve=True),
         logger=logger,
         enable_checkpointing=False,
-        callbacks=[EpochCheckpoint(run_dir, cfg.output_model_name)],
+        callbacks=[EpochTimer(), EpochCheckpoint(run_dir, cfg.output_model_name)],
     )
 
     py_log.info("Run directory: %s", run_dir)

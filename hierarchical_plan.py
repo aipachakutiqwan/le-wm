@@ -9,9 +9,13 @@ they directly use its weights; planning logic that is independent of model
 parameters lives here.
 """
 
+import logging
+
 import torch
 
 from hierarchical_lewm import HierarchicalLeWM
+
+py_log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -118,6 +122,9 @@ def plan(
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
     # best_mac: (H_high, d_L)
 
+    outer_best_cost = outer_cost(best_mac.unsqueeze(0)).item()
+    py_log.debug("  outer CEM done — best cost: %.4f", outer_best_cost)
+
     # ── Derive first subgoal ──────────────────────────────────────────────────
     z_sg = model._rollout_high(z_init, best_mac.unsqueeze(0))[:, 0].squeeze(0)  # (D,)
 
@@ -132,5 +139,8 @@ def plan(
 
     best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters)
     # best_act: (h_low, action_dim)
+
+    inner_best_cost = inner_cost(best_act.unsqueeze(0)).item()
+    py_log.debug("  inner CEM done — best cost: %.4f", inner_best_cost)
 
     return best_act[0]   # first primitive action: (action_dim,)

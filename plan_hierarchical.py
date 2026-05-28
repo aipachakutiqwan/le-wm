@@ -57,20 +57,28 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
     device     : torch device string
     """
 
-    def __init__(self, model, plan_cfg, process, transform, device):
+    def __init__(self, model, plan_cfg, process, transform, device, eval_budget: int = 0):
         super().__init__()
         self.model = model.eval().to(device)
         self.plan_cfg = plan_cfg
         self.process = process
         self.transform = transform
         self.device = device
+        self._eval_budget = eval_budget          # total env steps per episode (for X/Y display)
         self._action_queue: deque = deque()
         # effective_action_dim = frameskip * base_action_dim; derived at first get_action call
         self._frameskip: int | None = None
+        self._total_plan_steps: int | None = None  # derived once frameskip is known
+        self._env_step: int = 0
+        self._plan_step: int = 0
+        self._total_plan_time: float = 0.0         # cumulative seconds spent in plan()
 
     def set_env(self, env) -> None:
         self.env = env
         self._action_queue.clear()
+        self._env_step = 0
+        self._plan_step = 0
+        self._total_plan_time = 0.0
 
     def _encode(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode pixel tensor to latent states.
@@ -104,8 +112,15 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         -------
         (num_envs, base_action_dim) numpy array, denormalised
         """
+        self._env_step += 1
+        env_prog = f"{self._env_step}/{self._eval_budget}" if self._eval_budget else str(self._env_step)
         if self._action_queue:
+            py_log.debug("env_step=%s  serving queued action (%d remaining)", env_prog, len(self._action_queue))
             return self._action_queue.popleft()
+
+        self._plan_step += 1
+        plan_prog = f"{self._plan_step}/{self._total_plan_steps}" if self._total_plan_steps else str(self._plan_step)
+        py_log.info("env_step=%s  plan_step=%s  running CEM planner", env_prog, plan_prog)
 
         info_dict = self._prepare_info(info_dict)
 
@@ -115,6 +130,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
 
         n_envs = z_init.shape[0]
         effective_actions = []
+        _t0 = time.perf_counter()
         for i in range(n_envs):
             a = plan(
                 self.model,
@@ -128,6 +144,9 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                 inner_iters=self.plan_cfg.inner_iters,
             )
             effective_actions.append(a.cpu().numpy())
+        _plan_elapsed = time.perf_counter() - _t0
+        self._total_plan_time += _plan_elapsed
+        py_log.info("  plan done in %.2f s  (total planning time: %.1f s)", _plan_elapsed, self._total_plan_time)
 
         # effective_actions: list of (effective_action_dim,) → stack to (E, eff_dim)
         eff = np.stack(effective_actions)
@@ -137,6 +156,8 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             base_dim = scaler.n_features_in_
             if self._frameskip is None:
                 self._frameskip = eff.shape[-1] // base_dim
+                if self._eval_budget:
+                    self._total_plan_steps = max(1, self._eval_budget // self._frameskip)
             fs = self._frameskip
             # reshape to (E * fs, base_dim), inverse-transform, reshape to (fs, E, base_dim)
             prim = eff.reshape(n_envs * fs, base_dim)
@@ -146,6 +167,8 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             base_dim = eff.shape[-1]
             if self._frameskip is None:
                 self._frameskip = 1
+                if self._eval_budget:
+                    self._total_plan_steps = self._eval_budget
             fs = self._frameskip
             prim = eff.reshape(fs, n_envs, base_dim)
 
@@ -244,6 +267,7 @@ def run(cfg: DictConfig):
         process=process,
         transform=transform,
         device=cfg.device,
+        eval_budget=cfg.eval.eval_budget,
     )
 
     ##########################
@@ -290,7 +314,8 @@ def run(cfg: DictConfig):
     elapsed = time.time() - t0
 
     py_log.info("metrics: %s", metrics)
-    py_log.info("evaluation time: %.1f s", elapsed)
+    py_log.info("evaluation time:      %.1f s (%.1f min)", elapsed, elapsed / 60)
+    py_log.info("total planning time:  %.1f s (%.1f%% of eval)", policy._total_plan_time, 100 * policy._total_plan_time / elapsed)
 
     out = results_path / cfg.output.filename
     out.parent.mkdir(parents=True, exist_ok=True)
