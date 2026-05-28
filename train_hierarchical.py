@@ -29,6 +29,7 @@ import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
 from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from omegaconf import OmegaConf, open_dict
 
 from hierarchical_lewm import HierarchicalLeWM, sample_waypoints
@@ -215,8 +216,12 @@ def run(cfg):
     run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(run_dir / "config.yaml", "w") as f:
-        OmegaConf.save(cfg, f)
+    @rank_zero_only
+    def _save_config():
+        with open(run_dir / "config.yaml", "w") as f:
+            OmegaConf.save(cfg, f)
+
+    _save_config()
 
     # Re-enable submodule logger disabled by Hydra's hydra_logging phase.
     logging.getLogger("hierarchical_lewm").disabled = False
