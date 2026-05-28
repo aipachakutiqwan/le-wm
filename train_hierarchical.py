@@ -29,6 +29,7 @@ import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
 from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.utilities.rank_zero import rank_zero_only
 from omegaconf import OmegaConf, open_dict
 
@@ -239,8 +240,16 @@ def run(cfg):
         dirpath=run_dir, filename=cfg.output_model_name, epoch_interval=1,
     )
 
+    # Strip the strategy string from the YAML and construct DDPStrategy directly.
+    # start_method='spawn' lets Lightning launch all GPU workers internally via
+    # multiprocessing.spawn so a plain `python train_hierarchical.py` uses every
+    # GPU listed in devices without needing torchrun.
+    trainer_cfg = {k: v for k, v in cfg.trainer.items() if k != "strategy"}
+    strategy = DDPStrategy(find_unused_parameters=True, start_method="spawn")
+
     trainer = pl.Trainer(
-        **cfg.trainer,
+        **trainer_cfg,
+        strategy=strategy,
         callbacks=[object_dump_callback],
         num_sanity_val_steps=1,
         logger=logger,
