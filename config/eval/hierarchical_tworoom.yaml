@@ -17,7 +17,7 @@ world:
   env_name: swm/TwoRoom-v1
   num_envs: ${eval.num_eval}
   max_episode_steps: ??? # set programmatically to 2 * eval_budget
-  history_size: 1
+  history_size: 3          # match stage-1 LeWM training context length
   frame_skip: 1            # policy handles frameskip internally via action queue
 
 dataset:
@@ -28,13 +28,14 @@ dataset:
 
 # Two-level CEM hyperparameters (mirror defaults from hierarchical_plan.plan)
 plan:
-  H_high: 3
+  H_high: 1          # subgoal one macro from z_now; prevents H>=2 rollout drift
   h_low: 10
   outer_samples: 512
   inner_samples: 256
   outer_iters: 5
-  inner_iters: 5
-  inner_std: 0.5     # initial inner-CEM std; match dataset action scale (~0.86), not 0.1
+  inner_iters: 30    # the big lever; 5 rounds can't converge in ~100-D action space
+  outer_std: 5.0     # matches A_ψ's empirical macro-action spread (per-dim std up to ~2)
+  inner_std: 1.0     # matches StandardScaler-normalised action scale (~1.0)
 
 # MPC loop config fed to swm.PlanConfig
 plan_config:
@@ -46,7 +47,7 @@ plan_config:
 eval:
   num_eval: 50
   goal_offset_steps: 25
-  eval_budget: 50          # primitive steps; matches tworoom flat eval for direct comparison
+  eval_budget: 250         # primitive steps; policy replans every frameskip=5 steps -> 50 plan calls
   img_size: 224
   dataset_name: tworoom
   callables:

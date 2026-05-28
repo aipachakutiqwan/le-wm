@@ -50,7 +50,7 @@ def cem(
         elite_idx = costs.argsort()[:n_elites]
         elites = candidates[elite_idx]
         mu = elites.mean(0)
-        std = elites.std(0).clamp(min=1e-4)
+        std = elites.std(0).clamp(min=0.1)
     return mu
 
 
@@ -70,7 +70,8 @@ def plan(
     inner_samples: int = 256,
     outer_iters: int = 5,
     inner_iters: int = 5,
-    inner_std: float = 0.5,
+    outer_std: float = 5.0,
+    inner_std: float = 1.0,
 ) -> torch.Tensor:
     """Two-level CEM-MPC. Returns the first primitive action to execute.
 
@@ -98,9 +99,11 @@ def plan(
     inner_samples  : CEM sample count for the inner loop
     outer_iters    : CEM iterations for the outer loop
     inner_iters    : CEM iterations for the inner loop
+    outer_std      : initial CEM std for the outer (macro-action) loop. 5.0 matches
+                     A_ψ's empirical output spread; the original 1.0 under-explored.
     inner_std      : initial CEM std for the inner (primitive-action) loop. Must
-                     roughly match the dataset action scale — too small (e.g. 0.1
-                     against std~0.86 actions) starves the search of exploration.
+                     roughly match the dataset action scale (StandardScaler-normalised
+                     actions have std~1.0); too small starves the search of exploration.
 
     Returns
     -------
@@ -111,7 +114,7 @@ def plan(
 
     # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
     mu_mac = torch.zeros(H_high, d_L, device=device)
-    std_mac = torch.ones(H_high, d_L, device=device)
+    std_mac = torch.full((H_high, d_L), outer_std, device=device)
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, H_high, d_L)

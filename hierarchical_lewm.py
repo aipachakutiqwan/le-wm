@@ -228,6 +228,7 @@ class HierarchicalLeWM(nn.Module):
         n_waypoints: int = 3,
         history_size: int = 3,
         lambda_var: float = 0.0,
+        lambda_kl: float = 0.0,
         # high-level predictor knobs (mirror low-level defaults from train.py)
         high_depth: int = 6,
         high_heads: int = 16,
@@ -247,6 +248,7 @@ class HierarchicalLeWM(nn.Module):
         self.action_dim = action_dim
         self.history_size = history_size
         self.lambda_var = lambda_var
+        self.lambda_kl = lambda_kl
 
         self.action_encoder_high = ActionEncoder(
             action_dim=action_dim,
@@ -367,15 +369,28 @@ class HierarchicalLeWM(nn.Module):
             # (Bardes et al., 2022 — https://arxiv.org/abs/2105.04906, Eq. 2).
             flat = macro_actions.reshape(-1, self.latent_action_dim)
             loss_var = F.relu(1.0 - flat.std(dim=0)).mean()
-            loss = loss_pred + self.lambda_var * loss_var
         else:
-            loss = loss_pred
             loss_var = pred_emb.new_zeros(1).squeeze()
+
+        if self.lambda_kl > 0.0:
+            # KL-to-N(0,I) moment-matching on A_ψ outputs: push mean->0 and std->1
+            # per dim so the macro-action distribution matches the planner's CEM
+            # sampling prior. Stronger than the one-sided variance hinge above
+            # (also constrains the mean; can be used in place of lambda_var).
+            loss_kl = (
+                macro_actions.pow(2).mean()
+                + (macro_actions.std(dim=(0, 1)) - 1).pow(2).mean()
+            )
+        else:
+            loss_kl = pred_emb.new_zeros(1).squeeze()
+
+        loss = loss_pred + self.lambda_var * loss_var + self.lambda_kl * loss_kl
 
         return {
             "loss": loss,
             "loss_pred": loss_pred,
             "loss_var": loss_var,
+            "loss_kl": loss_kl,
             "high_pred_emb": pred_emb,
             "high_target_emb": target_emb,
         }
@@ -485,6 +500,7 @@ def train_hierarchical_lewm(
         + list(model.high_predictor.parameters())
     )
     optimizer = torch.optim.AdamW(stage2_params, lr=lr, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
 
     if freeze_encoder:
         for p in model.jepa.parameters():
@@ -544,7 +560,9 @@ def train_hierarchical_lewm(
             "stage2/epoch_loss_var":  epoch_var  / n,
             "stage2/epoch":           epoch + 1,
             "stage2/tf_prob":         tf_prob,
+            "stage2/lr":              scheduler.get_last_lr()[0],
         }
+        scheduler.step()
 
         val_str = ""
         if val_dataloader is not None and len(val_dataloader) > 0:

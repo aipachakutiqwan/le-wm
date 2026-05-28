@@ -126,7 +126,8 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                 inner_samples=self.plan_cfg.inner_samples,
                 outer_iters=self.plan_cfg.outer_iters,
                 inner_iters=self.plan_cfg.inner_iters,
-                inner_std=self.plan_cfg.get("inner_std", 0.5),
+                outer_std=self.plan_cfg.get("outer_std", 5.0),
+                inner_std=self.plan_cfg.get("inner_std", 1.0),
             )
             effective_actions.append(a.cpu().numpy())
 
