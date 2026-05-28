@@ -23,18 +23,35 @@ import logging
 from functools import partial
 from pathlib import Path
 
-py_log = logging.getLogger(__name__)
-
 import hydra
 import lightning as pl
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
+from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
 from hierarchical_lewm import HierarchicalLeWM, HierarchicalLeWMModule
 from utils import get_column_normalizer, get_img_preprocessor
+
+py_log = logging.getLogger(__name__)
+
+
+class EpochCheckpoint(Callback):
+    """Save module.model as a plain torch object after every epoch (rank 0 only)."""
+
+    def __init__(self, run_dir: Path, model_name: str):
+        self.run_dir = run_dir
+        self.model_name = model_name
+
+    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        if not trainer.is_global_zero:
+            return
+        epoch = trainer.current_epoch + 1
+        path = self.run_dir / f"{self.model_name}_epoch_{epoch}_object.ckpt"
+        torch.save(pl_module.model, path)
+        py_log.info("Saved epoch-%d checkpoint to %s", epoch, path)
 
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
