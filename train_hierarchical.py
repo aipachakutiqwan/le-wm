@@ -147,6 +147,7 @@ def run(cfg):
         **OmegaConf.to_container(cfg.trainer, resolve=True),
         logger=logger,
         enable_checkpointing=False,
+        callbacks=[EpochCheckpoint(run_dir, cfg.output_model_name)],
     )
 
     py_log.info("Run directory: %s", run_dir)
