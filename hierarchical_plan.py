@@ -1,7 +1,8 @@
 """Hierarchical LeWM — two-level CEM-MPC planner.
 
-Entry point: plan()
-Utility:     cem()
+Entry points : plan()         — single-environment (D,) latents
+               plan_batched() — E environments in parallel on one device
+Utilities    : cem(), cem_batched()
 
 Both operate on a trained HierarchicalLeWM from hierarchical_lewm.py.
 The rollout helpers (_rollout_high, _rollout_low) live on the model because
@@ -144,3 +145,123 @@ def plan(
     py_log.debug("  inner CEM done — best cost: %.4f", inner_best_cost)
 
     return best_act[0]   # first primitive action: (action_dim,)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Batched CEM  (E independent problems solved simultaneously)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def cem_batched(
+    cost_fn,
+    mu: torch.Tensor,
+    std: torch.Tensor,
+    n_samples: int = 512,
+    n_iters: int = 5,
+    elite_frac: float = 0.1,
+) -> torch.Tensor:
+    """CEM for E independent problems solved simultaneously.
+
+    Parameters
+    ----------
+    cost_fn    : callable (E, S, *shape) -> (E, S) — lower is better
+    mu         : (E, *shape) initial means
+    std        : (E, *shape) initial stds
+    n_samples  : candidates per iteration per environment
+    n_iters    : CEM iterations
+    elite_frac : fraction kept as elites
+
+    Returns
+    -------
+    (E, *shape) optimised means
+    """
+    E = mu.shape[0]
+    n_elites = max(1, int(n_samples * elite_frac))
+    e_idx = torch.arange(E, device=mu.device)
+    for _ in range(n_iters):
+        eps = torch.randn(E, n_samples, *mu.shape[1:], device=mu.device)
+        candidates = mu.unsqueeze(1) + std.unsqueeze(1) * eps        # (E, S, *shape)
+        costs = cost_fn(candidates)                                   # (E, S)
+        elite_idx = costs.argsort(dim=1)[:, :n_elites]               # (E, n_elites)
+        elites = candidates[e_idx.unsqueeze(1), elite_idx]            # (E, n_elites, *shape)
+        mu = elites.mean(dim=1)
+        std = elites.std(dim=1).clamp(min=0.1)
+    return mu
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Batched two-level CEM-MPC
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@torch.no_grad()
+def plan_batched(
+    model: HierarchicalLeWM,
+    z_init: torch.Tensor,
+    z_goal: torch.Tensor,
+    H_high: int = 3,
+    h_low: int = 10,
+    outer_samples: int = 512,
+    inner_samples: int = 256,
+    outer_iters: int = 5,
+    inner_iters: int = 5,
+) -> torch.Tensor:
+    """Two-level CEM-MPC for E environments solved in parallel on one device.
+
+    Equivalent to calling plan() E times but fuses all rollouts into single
+    batched forward passes, giving a large GPU utilisation improvement.
+
+    Parameters
+    ----------
+    model  : trained HierarchicalLeWM
+    z_init : (E, D) current latent states
+    z_goal : (E, D) goal latent states
+    (remaining args identical to plan())
+
+    Returns
+    -------
+    (E, action_dim) — first primitive action for each environment
+    """
+    E, D = z_init.shape
+    device = z_init.device
+    d_L = model.latent_action_dim
+
+    # ── Outer CEM ──────────────────────────────────────────────────────────────
+    mu_mac = torch.zeros(E, H_high, d_L, device=device)
+    std_mac = torch.full((E, H_high, d_L), 5.0, device=device)
+
+    def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
+        # candidates: (E, S, H_high, d_L)
+        S = candidates.shape[1]
+        mac_flat = candidates.reshape(E * S, H_high, d_L)
+        z_flat = z_init.unsqueeze(1).expand(E, S, D).reshape(E * S, D)
+        subgoals = model._rollout_high(z_flat, mac_flat)              # (E*S, H_high, D)
+        z_last = subgoals[:, -1].reshape(E, S, D)                    # (E, S, D)
+        return (z_last - z_goal.unsqueeze(1)).abs().sum(-1)           # (E, S)
+
+    best_mac = cem_batched(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
+    if py_log.isEnabledFor(logging.DEBUG):
+        py_log.debug("  [batched] outer CEM done — mean best cost: %.4f",
+                     outer_cost(best_mac.unsqueeze(1)).mean().item())
+
+    # ── Derive first subgoal per environment ───────────────────────────────────
+    z_sg = model._rollout_high(z_init, best_mac)[:, 0]               # (E, D)
+
+    # ── Inner CEM ──────────────────────────────────────────────────────────────
+    mu_act = torch.zeros(E, h_low, model.action_dim, device=device)
+    std_act = torch.full((E, h_low, model.action_dim), 1.0, device=device)
+
+    def inner_cost(candidates: torch.Tensor) -> torch.Tensor:
+        # candidates: (E, S, h_low, action_dim)
+        S = candidates.shape[1]
+        act_flat = candidates.reshape(E * S, h_low, model.action_dim)
+        z_flat = z_init.unsqueeze(1).expand(E, S, D).reshape(E * S, D)
+        z_final = model._rollout_low(z_flat, act_flat).reshape(E, S, D)  # (E, S, D)
+        return (z_final - z_sg.unsqueeze(1)).abs().sum(-1)               # (E, S)
+
+    best_act = cem_batched(inner_cost, mu_act, std_act, inner_samples, inner_iters)
+    if py_log.isEnabledFor(logging.DEBUG):
+        py_log.debug("  [batched] inner CEM done — mean best cost: %.4f",
+                     inner_cost(best_act.unsqueeze(1)).mean().item())
+
+    return best_act[:, 0]   # (E, action_dim)

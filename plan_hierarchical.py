@@ -14,10 +14,12 @@ python plan_hierarchical.py checkpoint=<path> eval.num_eval=10
 python plan_hierarchical.py checkpoint=<path> device=cuda
 """
 
+import copy
 import os
 import logging
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 py_log = logging.getLogger(__name__)
@@ -33,8 +35,7 @@ from omegaconf import DictConfig, OmegaConf
 from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 
-
-from hierarchical_plan import plan
+from hierarchical_plan import plan, plan_batched
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -73,6 +74,18 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self._plan_step: int = 0
         self._total_plan_time: float = 0.0         # cumulative seconds spent in plan()
 
+        # Build per-GPU model replicas for multi-GPU planning.
+        # Each entry is (device_str, model_replica); single GPU / CPU → one entry.
+        n_cuda = torch.cuda.device_count()
+        if n_cuda > 1:
+            self._gpu_replicas = [
+                (f"cuda:{i}", copy.deepcopy(self.model).eval().to(f"cuda:{i}"))
+                for i in range(n_cuda)
+            ]
+            py_log.info("Multi-GPU planning: %d GPUs — environments will be sharded across them", n_cuda)
+        else:
+            self._gpu_replicas = [(device, self.model)]
+
     def set_env(self, env) -> None:
         self.env = env
         self._action_queue.clear()
@@ -95,6 +108,36 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         with torch.no_grad():
             emb = self.model.jepa.encode({"pixels": pixels})["emb"]
         return emb[:, -1]   # (E, D)
+
+    def _plan_multi_gpu(
+        self,
+        z_init: torch.Tensor,
+        z_goal: torch.Tensor,
+        plan_kwargs: dict,
+    ) -> np.ndarray:
+        """Shard environments across GPUs and run plan_batched on each shard in parallel."""
+        n_gpus = len(self._gpu_replicas)
+        # tensor_split handles uneven E gracefully (last shard may be 1 smaller)
+        z_init_shards = torch.tensor_split(z_init, n_gpus, dim=0)
+        z_goal_shards = torch.tensor_split(z_goal, n_gpus, dim=0)
+
+        def _run_shard(dev, replica, zi, zg):
+            return plan_batched(replica, zi.to(dev), zg.to(dev), **plan_kwargs).cpu().numpy()
+
+        # skip empty shards (can occur when E < n_gpus)
+        active = [
+            (dr, zi, zg)
+            for dr, zi, zg in zip(self._gpu_replicas, z_init_shards, z_goal_shards)
+            if zi.shape[0] > 0
+        ]
+        with ThreadPoolExecutor(max_workers=len(active)) as pool:
+            futures = [
+                pool.submit(_run_shard, dev, replica, zi, zg)
+                for (dev, replica), zi, zg in active
+            ]
+            results = [f.result() for f in futures]
+
+        return np.concatenate(results, axis=0)
 
     def get_action(self, info_dict: dict, **kwargs) -> np.ndarray:
         """Plan and return the next primitive action for each environment.
@@ -127,29 +170,24 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         # after _prepare_info: pixels / goal are (E, T, C, H, W) tensors
         z_init = self._encode(info_dict["pixels"])   # (E, D)
         z_goal = self._encode(info_dict["goal"])     # (E, D)
-
         n_envs = z_init.shape[0]
-        effective_actions = []
+
+        plan_kwargs = dict(
+            H_high=self.plan_cfg.H_high,
+            h_low=self.plan_cfg.h_low,
+            outer_samples=self.plan_cfg.outer_samples,
+            inner_samples=self.plan_cfg.inner_samples,
+            outer_iters=self.plan_cfg.outer_iters,
+            inner_iters=self.plan_cfg.inner_iters,
+        )
         _t0 = time.perf_counter()
-        for i in range(n_envs):
-            a = plan(
-                self.model,
-                z_init[i],
-                z_goal[i],
-                H_high=self.plan_cfg.H_high,
-                h_low=self.plan_cfg.h_low,
-                outer_samples=self.plan_cfg.outer_samples,
-                inner_samples=self.plan_cfg.inner_samples,
-                outer_iters=self.plan_cfg.outer_iters,
-                inner_iters=self.plan_cfg.inner_iters,
-            )
-            effective_actions.append(a.cpu().numpy())
+        if len(self._gpu_replicas) > 1:
+            eff = self._plan_multi_gpu(z_init, z_goal, plan_kwargs)
+        else:
+            eff = plan_batched(self.model, z_init, z_goal, **plan_kwargs).cpu().numpy()
         _plan_elapsed = time.perf_counter() - _t0
         self._total_plan_time += _plan_elapsed
         py_log.info("  plan done in %.2f s  (total planning time: %.1f s)", _plan_elapsed, self._total_plan_time)
-
-        # effective_actions: list of (effective_action_dim,) → stack to (E, eff_dim)
-        eff = np.stack(effective_actions)
 
         if "action" in self.process:
             scaler = self.process["action"]
