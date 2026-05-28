@@ -1,15 +1,17 @@
 """Hierarchical LeWM — models and stage-2 training.
 
 New components (jepa.py and module.py are not modified):
-  ActionEncoder       A_ψ  : action chunk  →  latent macro-action
-  HighLevelPredictor  P^(2): AR transformer over waypoint latents
-  HierarchicalLeWM        : wrapper with forward_low / forward_high + rollout helpers
-  sample_waypoints        : HWM-style waypoint sampler
-  train_hierarchical_lewm : stage-2 training driver
+  ActionEncoder          A_ψ  : action chunk  →  latent macro-action
+  HighLevelPredictor     P^(2): AR transformer over waypoint latents
+  HierarchicalLeWM           : wrapper with forward_low / forward_high + rollout helpers
+  sample_waypoints           : HWM-style waypoint sampler
+  HierarchicalLeWMModule     : Lightning module for stage-2 training (1 or N GPUs)
+  train_hierarchical_lewm    : plain-PyTorch stage-2 training driver (single GPU)
 
 See hierarchical_plan.py for the two-level CEM-MPC planner.
 """
 
+import lightning as pl
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -446,3 +448,65 @@ def train_hierarchical_lewm(
             wandb_run.log({"stage2/loss": avg_loss, "stage2/lr": scheduler.get_last_lr()[0]}, step=epoch + 1)
 
     return model
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Lightning Module — stage-2 training (1 GPU or multi-GPU via DDP)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class HierarchicalLeWMModule(pl.LightningModule):
+    """Stage-2 Lightning module: trains A_ψ and P^(2) while keeping E and P^(1) frozen.
+
+    Works transparently on 1 GPU or N GPUs (DDP) — set ``devices: auto`` in the
+    Trainer config.  The inner HierarchicalLeWM is accessible via ``self.model``
+    after training.
+
+    Parameters
+    ----------
+    model          : HierarchicalLeWM with a stage-1-trained inner jepa
+    n_waypoints    : N interior waypoints per trajectory
+    lr             : AdamW learning rate for stage-2 parameters
+    freeze_encoder : keep E and P^(1) frozen (recommended)
+    """
+
+    def __init__(
+        self,
+        model: HierarchicalLeWM,
+        n_waypoints: int,
+        lr: float = 5e-4,
+        freeze_encoder: bool = True,
+    ):
+        super().__init__()
+        self.model = model
+        self.n_waypoints = n_waypoints
+        self.lr = lr
+        self.freeze_encoder = freeze_encoder
+
+    def setup(self, stage: str) -> None:
+        if stage == "fit" and self.freeze_encoder:
+            for p in self.model.jepa.parameters():
+                p.requires_grad_(False)
+
+    def training_step(self, batch, batch_idx):
+        T = batch["pixels"].shape[1]
+        wp_idx = sample_waypoints(T, N=self.n_waypoints, device=self.device)
+        out = self.model.forward_high(batch, wp_idx, freeze_encoder=self.freeze_encoder)
+        self.log("train/loss", out["loss"], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train/tf_loss", out["tf_loss"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train/kl_term", out["kl_term"], on_step=False, on_epoch=True, sync_dist=True)
+        return out["loss"]
+
+    def configure_optimizers(self):
+        stage2_params = (
+            list(self.model.action_encoder_high.parameters())
+            + list(self.model.high_predictor.parameters())
+        )
+        optimizer = torch.optim.AdamW(stage2_params, lr=self.lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.trainer.max_epochs
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
+        }

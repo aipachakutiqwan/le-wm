@@ -17,7 +17,14 @@ encoder_scale: tiny
 
 train_split: 0.9
 
-device: cuda 
+# Lightning Trainer — set devices: auto to use all visible GPUs (DDP),
+# or devices: 1 for single-GPU / CPU runs.
+trainer:
+  max_epochs: ${stage2.n_epochs}
+  accelerator: gpu
+  devices: auto
+  precision: bf16-mixed
+  log_every_n_steps: 1
 
 loader:
   batch_size: 64

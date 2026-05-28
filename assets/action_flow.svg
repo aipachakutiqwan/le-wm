@@ -1,0 +1,214 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="540" font-family="sans-serif">
+
+  <!-- Background -->
+  <rect width="860" height="540" fill="#f8f9fa" rx="12"/>
+
+  <!-- Title -->
+  <text x="430" y="30" text-anchor="middle" font-size="15" font-weight="bold" fill="#1a1a2e">How an action is obtained and applied to agent_pos</text>
+
+  <!-- ══════════════════════════════════════
+       COLUMN 1 — CEM output (once per 25 steps)
+  ══════════════════════════════════════ -->
+
+  <rect x="20" y="48" width="190" height="440" rx="10" fill="#eef0fb" stroke="#4361ee" stroke-width="1.5"/>
+  <text x="115" y="68" text-anchor="middle" font-size="11" font-weight="bold" fill="#3a0ca3">CEM  (runs once)</text>
+  <text x="115" y="82" text-anchor="middle" font-size="9" fill="#4361ee">every 25 real steps</text>
+
+  <!-- candidates -->
+  <rect x="34" y="94" width="162" height="44" rx="7" fill="#dbe4ff" stroke="#4361ee" stroke-width="1"/>
+  <text x="115" y="112" text-anchor="middle" font-size="10" font-weight="bold" fill="#3a0ca3">300 action candidates</text>
+  <text x="115" y="126" text-anchor="middle" font-size="9" fill="#3a0ca3">(300, 5, action_dim×5)</text>
+
+  <!-- rollout -->
+  <rect x="34" y="150" width="162" height="44" rx="7" fill="#c5cae9" stroke="#4361ee" stroke-width="1"/>
+  <text x="115" y="168" text-anchor="middle" font-size="10" font-weight="bold" fill="#1a237e">Predictor rollout</text>
+  <text x="115" y="182" text-anchor="middle" font-size="9" fill="#1a237e">H=5 imagined steps</text>
+
+  <!-- cost -->
+  <rect x="34" y="206" width="162" height="44" rx="7" fill="#fce4ec" stroke="#c2185b" stroke-width="1"/>
+  <text x="115" y="224" text-anchor="middle" font-size="10" font-weight="bold" fill="#880e4f">Cost MSE(ẑ₅, z_g)</text>
+  <text x="115" y="238" text-anchor="middle" font-size="9" fill="#880e4f">→ keep top 30</text>
+
+  <!-- best actions -->
+  <rect x="34" y="262" width="162" height="44" rx="7" fill="#4361ee" stroke="#3a0ca3" stroke-width="1"/>
+  <text x="115" y="280" text-anchor="middle" font-size="10" font-weight="bold" fill="#fff">Best action sequence</text>
+  <text x="115" y="294" text-anchor="middle" font-size="9" fill="#e0e0ff">shape: (5, action_dim×5)</text>
+
+  <!-- arrow down -->
+  <line x1="115" y1="306" x2="115" y2="328" stroke="#4361ee" stroke-width="2" marker-end="url(#blueArr)"/>
+
+  <!-- reshape -->
+  <rect x="34" y="328" width="162" height="44" rx="7" fill="#fff" stroke="#4361ee" stroke-width="1"/>
+  <text x="115" y="346" text-anchor="middle" font-size="10" font-weight="bold" fill="#3a0ca3">reshape</text>
+  <text x="115" y="360" text-anchor="middle" font-size="9" fill="#3a0ca3">(5×5=25, action_dim)</text>
+
+  <!-- arrow down -->
+  <line x1="115" y1="372" x2="115" y2="394" stroke="#4361ee" stroke-width="2" marker-end="url(#blueArr)"/>
+
+  <!-- buffer -->
+  <rect x="34" y="394" width="162" height="44" rx="7" fill="#fff9c4" stroke="#f9a825" stroke-width="1.5"/>
+  <text x="115" y="412" text-anchor="middle" font-size="10" font-weight="bold" fill="#f57f17">Action buffer</text>
+  <text x="115" y="426" text-anchor="middle" font-size="9" fill="#f57f17">deque  maxlen=25</text>
+
+  <!-- ══════════════════════════════════════
+       COLUMN 2 — per-step dequeue
+  ══════════════════════════════════════ -->
+
+  <rect x="240" y="48" width="190" height="440" rx="10" fill="#fff8e1" stroke="#f9a825" stroke-width="1.5"/>
+  <text x="335" y="68" text-anchor="middle" font-size="11" font-weight="bold" fill="#f57f17">Per real env step</text>
+  <text x="335" y="82" text-anchor="middle" font-size="9" fill="#f9a825">policy.get_action()</text>
+
+  <!-- check buffer -->
+  <rect x="254" y="94" width="162" height="44" rx="7" fill="#fff" stroke="#f9a825" stroke-width="1"/>
+  <text x="335" y="112" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">buffer empty?</text>
+  <text x="335" y="126" text-anchor="middle" font-size="9" fill="#e65100">if yes → call CEM again</text>
+
+  <!-- arrow -->
+  <line x1="335" y1="138" x2="335" y2="158" stroke="#f9a825" stroke-width="2" marker-end="url(#yellowArr)"/>
+
+  <!-- popleft -->
+  <rect x="254" y="158" width="162" height="44" rx="7" fill="#fff9c4" stroke="#f9a825" stroke-width="1.5"/>
+  <text x="335" y="176" text-anchor="middle" font-size="10" font-weight="bold" fill="#f57f17">popleft()</text>
+  <text x="335" y="190" text-anchor="middle" font-size="9" fill="#f57f17">one action  (action_dim,)</text>
+
+  <!-- arrow -->
+  <line x1="335" y1="202" x2="335" y2="222" stroke="#f9a825" stroke-width="2" marker-end="url(#yellowArr)"/>
+
+  <!-- inverse transform -->
+  <rect x="254" y="222" width="162" height="44" rx="7" fill="#fff" stroke="#f9a825" stroke-width="1"/>
+  <text x="335" y="240" text-anchor="middle" font-size="10" font-weight="bold" fill="#e65100">inverse_transform()</text>
+  <text x="335" y="254" text-anchor="middle" font-size="9" fill="#e65100">StandardScaler → raw int</text>
+
+  <!-- arrow -->
+  <line x1="335" y1="266" x2="335" y2="286" stroke="#f9a825" stroke-width="2" marker-end="url(#yellowArr)"/>
+
+  <!-- action value -->
+  <rect x="254" y="286" width="162" height="44" rx="7" fill="#f57f17" stroke="#e65100" stroke-width="1.5"/>
+  <text x="335" y="304" text-anchor="middle" font-size="10" font-weight="bold" fill="#fff">action ∈ {0, 1, 2}</text>
+  <text x="335" y="318" text-anchor="middle" font-size="9" fill="#ffe0b2">0=turn left  1=turn right  2=forward</text>
+
+  <!-- ══════════════════════════════════════
+       COLUMN 3 — env step
+  ══════════════════════════════════════ -->
+
+  <rect x="460" y="48" width="190" height="440" rx="10" fill="#e8f5e9" stroke="#52b788" stroke-width="1.5"/>
+  <text x="555" y="68" text-anchor="middle" font-size="11" font-weight="bold" fill="#1b4332">Real env step</text>
+  <text x="555" y="82" text-anchor="middle" font-size="9" fill="#52b788">world.step()  →  envs.step(action)</text>
+
+  <!-- minigrid step -->
+  <rect x="474" y="94" width="162" height="44" rx="7" fill="#fff" stroke="#52b788" stroke-width="1"/>
+  <text x="555" y="112" text-anchor="middle" font-size="10" font-weight="bold" fill="#1b4332">MiniGrid.step(action)</text>
+  <text x="555" y="126" text-anchor="middle" font-size="9" fill="#2d6a4f">super().step() in env.py:177</text>
+
+  <!-- arrow -->
+  <line x1="555" y1="138" x2="555" y2="158" stroke="#52b788" stroke-width="2" marker-end="url(#greenArr)"/>
+
+  <!-- action branch -->
+  <rect x="474" y="158" width="162" height="74" rx="7" fill="#d8f3dc" stroke="#52b788" stroke-width="1"/>
+  <text x="555" y="176" text-anchor="middle" font-size="10" font-weight="bold" fill="#1b4332">action = 0 or 1</text>
+  <text x="555" y="192" text-anchor="middle" font-size="9" fill="#2d6a4f">agent_dir += ±1</text>
+  <text x="555" y="208" text-anchor="middle" font-size="9" fill="#2d6a4f">agent_pos unchanged</text>
+  <line x1="555" y1="216" x2="555" y2="226" stroke="#adb5bd" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="555" y="226" text-anchor="middle" font-size="10" font-weight="bold" fill="#1b4332">action = 2  (forward)</text>
+
+  <!-- arrow -->
+  <line x1="555" y1="232" x2="555" y2="252" stroke="#52b788" stroke-width="2" marker-end="url(#greenArr)"/>
+
+  <!-- wall check -->
+  <rect x="474" y="252" width="162" height="44" rx="7" fill="#fff" stroke="#52b788" stroke-width="1"/>
+  <text x="555" y="270" text-anchor="middle" font-size="10" font-weight="bold" fill="#1b4332">wall ahead?</text>
+  <text x="555" y="284" text-anchor="middle" font-size="9" fill="#2d6a4f">if yes → agent_pos unchanged</text>
+
+  <!-- arrow -->
+  <line x1="555" y1="296" x2="555" y2="316" stroke="#52b788" stroke-width="2" marker-end="url(#greenArr)"/>
+
+  <!-- agent pos update -->
+  <rect x="474" y="316" width="162" height="44" rx="7" fill="#52b788" stroke="#1b4332" stroke-width="1.5"/>
+  <text x="555" y="334" text-anchor="middle" font-size="10" font-weight="bold" fill="#fff">agent_pos += direction</text>
+  <text x="555" y="348" text-anchor="middle" font-size="9" fill="#d8f3dc">one cell forward on grid</text>
+
+  <!-- ══════════════════════════════════════
+       COLUMN 4 — success check
+  ══════════════════════════════════════ -->
+
+  <rect x="680" y="48" width="162" height="440" rx="10" fill="#fce4ec" stroke="#c2185b" stroke-width="1.5"/>
+  <text x="761" y="68" text-anchor="middle" font-size="11" font-weight="bold" fill="#880e4f">Success check</text>
+  <text x="761" y="82" text-anchor="middle" font-size="9" fill="#c2185b">eval_state()  env.py:222</text>
+
+  <!-- distance -->
+  <rect x="694" y="94" width="134" height="54" rx="7" fill="#fff" stroke="#c2185b" stroke-width="1"/>
+  <text x="761" y="112" text-anchor="middle" font-size="10" font-weight="bold" fill="#880e4f">Manhattan distance</text>
+  <text x="761" y="128" text-anchor="middle" font-size="9" fill="#880e4f">|agent_pos - goal_pos|</text>
+  <text x="761" y="142" text-anchor="middle" font-size="9" fill="#880e4f">ord=1</text>
+
+  <!-- arrow -->
+  <line x1="761" y1="148" x2="761" y2="168" stroke="#c2185b" stroke-width="2" marker-end="url(#redArr)"/>
+
+  <!-- success -->
+  <rect x="694" y="168" width="134" height="44" rx="7" fill="#f72585" stroke="#c2185b" stroke-width="1.5"/>
+  <text x="761" y="186" text-anchor="middle" font-size="10" font-weight="bold" fill="#fff">terminated</text>
+  <text x="761" y="200" text-anchor="middle" font-size="9" fill="#ffe0f0">distance == 0</text>
+
+  <!-- arrow -->
+  <line x1="761" y1="212" x2="761" y2="232" stroke="#c2185b" stroke-width="2" marker-end="url(#redArr)"/>
+
+  <!-- latch -->
+  <rect x="694" y="232" width="134" height="54" rx="7" fill="#fff" stroke="#c2185b" stroke-width="1"/>
+  <text x="761" y="250" text-anchor="middle" font-size="10" font-weight="bold" fill="#880e4f">episode_successes</text>
+  <text x="761" y="266" text-anchor="middle" font-size="9" fill="#880e4f">OR across all steps</text>
+  <text x="761" y="280" text-anchor="middle" font-size="9" fill="#880e4f">latched if True</text>
+
+  <!-- arrow -->
+  <line x1="761" y1="286" x2="761" y2="306" stroke="#c2185b" stroke-width="2" marker-end="url(#redArr)"/>
+
+  <!-- success rate -->
+  <rect x="694" y="306" width="134" height="44" rx="7" fill="#880e4f" stroke="#c2185b" stroke-width="1.5"/>
+  <text x="761" y="324" text-anchor="middle" font-size="10" font-weight="bold" fill="#fff">success_rate</text>
+  <text x="761" y="338" text-anchor="middle" font-size="9" fill="#fce4ec">sum / 50 × 100 %</text>
+
+  <!-- ══════════════════════════════════════
+       HORIZONTAL CONNECTOR ARROWS
+  ══════════════════════════════════════ -->
+
+  <!-- buffer → popleft -->
+  <line x1="196" y1="416" x2="254" y2="308" stroke="#f9a825" stroke-width="2" marker-end="url(#yellowArr)"/>
+
+  <!-- action value → MiniGrid step -->
+  <line x1="416" y1="308" x2="474" y2="280" stroke="#52b788" stroke-width="2" marker-end="url(#greenArr)"/>
+  <text x="445" y="302" text-anchor="middle" font-size="9" fill="#1b4332">action ∈{0,1,2}</text>
+
+  <!-- agent_pos update → success check -->
+  <line x1="636" y1="338" x2="694" y2="160" stroke="#c2185b" stroke-width="2" marker-end="url(#redArr)"/>
+  <text x="672" y="270" text-anchor="middle" font-size="9" fill="#880e4f">new</text>
+  <text x="672" y="282" text-anchor="middle" font-size="9" fill="#880e4f">agent_pos</text>
+
+  <!-- ══════════════════════════════════════
+       BOTTOM LOOP ARROW (new obs → next step)
+  ══════════════════════════════════════ -->
+  <path d="M555,490 Q430,520 335,490" fill="none" stroke="#6c757d" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#grayArr)"/>
+  <text x="445" y="515" text-anchor="middle" font-size="9" fill="#6c757d">new pixels → next get_action() call</text>
+
+  <!-- boxes bottom anchors (invisible) for loop arrow -->
+  <rect x="474" y="480" width="162" height="12" rx="3" fill="#e8f5e9" opacity="0.5"/>
+  <rect x="254" y="480" width="162" height="12" rx="3" fill="#fff8e1" opacity="0.5"/>
+
+  <!-- defs -->
+  <defs>
+    <marker id="blueArr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#4361ee"/>
+    </marker>
+    <marker id="yellowArr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#f9a825"/>
+    </marker>
+    <marker id="greenArr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#52b788"/>
+    </marker>
+    <marker id="redArr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#c2185b"/>
+    </marker>
+    <marker id="grayArr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#6c757d"/>
+    </marker>
+  </defs>
+
+</svg>

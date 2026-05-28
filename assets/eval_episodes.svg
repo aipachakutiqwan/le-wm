@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="620" font-family="monospace, sans-serif">
+
+  <!-- Background -->
+  <rect width="900" height="620" fill="#f8f9fa" rx="12"/>
+
+  <!-- Title -->
+  <text x="450" y="36" text-anchor="middle" font-size="16" font-weight="bold" fill="#1a1a2e">TwoRoom Evaluation  —  tworoom.yaml + cem.yaml</text>
+
+  <!-- ── EVALUATION RUN box ── -->
+  <rect x="20" y="55" width="860" height="540" rx="10" fill="none" stroke="#adb5bd" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="36" y="74" font-size="11" fill="#6c757d">EVALUATION RUN</text>
+  <text x="240" y="74" font-size="11" fill="#495057">50 episodes   (num_eval: 50)</text>
+
+  <!-- ── Dataset sample box ── -->
+  <rect x="40" y="82" width="820" height="58" rx="8" fill="#e9ecef" stroke="#ced4da" stroke-width="1"/>
+  <text x="450" y="101" text-anchor="middle" font-size="12" font-weight="bold" fill="#343a40">Dataset  —  TwoRoom HDF5</text>
+  <text x="450" y="120" text-anchor="middle" font-size="11" fill="#495057">50 random (o₁, o_g) pairs sampled without replacement  ·  goal_offset_steps: 25 frames ahead</text>
+
+  <!-- arrow dataset -> episodes -->
+  <line x1="450" y1="140" x2="450" y2="158" stroke="#6c757d" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ── EPISODE template box ── -->
+  <rect x="40" y="158" width="820" height="420" rx="8" fill="none" stroke="#6c757d" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="56" y="176" font-size="11" fill="#6c757d">EPISODE  i  of 50   (eval_budget: 50 env steps)</text>
+
+  <!-- o1 og pills -->
+  <rect x="60" y="184" width="60" height="28" rx="6" fill="#4cc9f0" opacity="0.85"/>
+  <text x="90" y="202" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">o₁</text>
+
+  <rect x="780" y="184" width="60" height="28" rx="6" fill="#f72585" opacity="0.8"/>
+  <text x="810" y="202" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">o_g</text>
+
+  <text x="450" y="200" text-anchor="middle" font-size="11" fill="#6c757d">← 25 expert steps →</text>
+
+  <!-- ════ CEM CALL 1 ════ -->
+  <rect x="56" y="222" width="372" height="150" rx="8" fill="#fff" stroke="#4361ee" stroke-width="1.5"/>
+  <text x="242" y="240" text-anchor="middle" font-size="12" font-weight="bold" fill="#4361ee">CEM Call 1   (env step 0)</text>
+
+  <!-- encode -->
+  <rect x="70" y="250" width="72" height="26" rx="5" fill="#4cc9f0" opacity="0.8"/>
+  <text x="106" y="267" text-anchor="middle" font-size="10" fill="#fff">Encode o₁→z₁</text>
+  <rect x="280" y="250" width="72" height="26" rx="5" fill="#f72585" opacity="0.8"/>
+  <text x="316" y="267" text-anchor="middle" font-size="10" fill="#fff">Encode o_g→z_g</text>
+
+  <!-- CEM loop -->
+  <rect x="70" y="288" width="340" height="72" rx="6" fill="#f1f3f9" stroke="#adb5bd" stroke-width="1"/>
+  <text x="240" y="306" text-anchor="middle" font-size="11" font-weight="bold" fill="#343a40">CEM  ×  n_steps: 30</text>
+  <text x="240" y="323" text-anchor="middle" font-size="10" fill="#495057">sample 300 candidates  (num_samples: 300)</text>
+  <text x="240" y="338" text-anchor="middle" font-size="10" fill="#495057">rollout H=5  →  cost(ẑ_H, z_g)  →  keep top 30</text>
+  <text x="240" y="353" text-anchor="middle" font-size="10" fill="#495057">→  best actions: shape (5, action_dim × 5)</text>
+
+  <!-- output arrow cem1 -->
+  <line x1="242" y1="372" x2="242" y2="390" stroke="#4361ee" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- buffer 1 -->
+  <rect x="120" y="390" width="244" height="26" rx="5" fill="#dbe4ff" stroke="#4361ee" stroke-width="1"/>
+  <text x="242" y="407" text-anchor="middle" font-size="10" fill="#3a0ca3">buffer: 25 actions queued  (receding_horizon × action_block)</text>
+
+  <!-- ════ EXEC BLOCK 1 ════ -->
+  <rect x="56" y="388" width="372" height="60" rx="0" fill="none"/>
+
+  <!-- steps 1-25 -->
+  <rect x="56" y="428" width="372" height="42" rx="6" fill="#d8f3dc" stroke="#52b788" stroke-width="1"/>
+  <text x="242" y="446" text-anchor="middle" font-size="11" font-weight="bold" fill="#1b4332">Execute  steps 1 – 25  in real env</text>
+  <text x="242" y="462" text-anchor="middle" font-size="10" fill="#2d6a4f">dequeue one action/step  ·  frame_skip: 1  ·  no re-plan</text>
+
+  <!-- ════ CEM CALL 2 ════ -->
+  <rect x="472" y="222" width="372" height="150" rx="8" fill="#fff" stroke="#7209b7" stroke-width="1.5"/>
+  <text x="658" y="240" text-anchor="middle" font-size="12" font-weight="bold" fill="#7209b7">CEM Call 2   (env step 25)</text>
+
+  <!-- encode -->
+  <rect x="486" y="250" width="80" height="26" rx="5" fill="#4cc9f0" opacity="0.8"/>
+  <text x="526" y="267" text-anchor="middle" font-size="10" fill="#fff">Encode o₂₅→z₁</text>
+  <rect x="690" y="250" width="72" height="26" rx="5" fill="#f72585" opacity="0.8"/>
+  <text x="726" y="267" text-anchor="middle" font-size="10" fill="#fff">Encode o_g→z_g</text>
+
+  <!-- CEM loop 2 -->
+  <rect x="486" y="288" width="340" height="72" rx="6" fill="#f1f3f9" stroke="#adb5bd" stroke-width="1"/>
+  <text x="656" y="306" text-anchor="middle" font-size="11" font-weight="bold" fill="#343a40">CEM  ×  n_steps: 30</text>
+  <text x="656" y="323" text-anchor="middle" font-size="10" fill="#495057">sample 300 candidates  (num_samples: 300)</text>
+  <text x="656" y="338" text-anchor="middle" font-size="10" fill="#495057">rollout H=5  →  cost(ẑ_H, z_g)  →  keep top 30</text>
+  <text x="656" y="353" text-anchor="middle" font-size="10" fill="#495057">→  best actions: shape (5, action_dim × 5)</text>
+
+  <!-- output arrow cem2 -->
+  <line x1="658" y1="372" x2="658" y2="390" stroke="#7209b7" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+  <!-- buffer 2 -->
+  <rect x="536" y="390" width="244" height="26" rx="5" fill="#e9d8fd" stroke="#7209b7" stroke-width="1"/>
+  <text x="658" y="407" text-anchor="middle" font-size="10" fill="#3a0ca3">buffer: 25 actions queued</text>
+
+  <!-- steps 26-50 -->
+  <rect x="472" y="428" width="372" height="42" rx="6" fill="#d8f3dc" stroke="#52b788" stroke-width="1"/>
+  <text x="658" y="446" text-anchor="middle" font-size="11" font-weight="bold" fill="#1b4332">Execute  steps 26 – 50  in real env</text>
+  <text x="658" y="462" text-anchor="middle" font-size="10" fill="#2d6a4f">dequeue one action/step  ·  episode ends at step 50</text>
+
+  <!-- connector between the two halves -->
+  <line x1="428" y1="449" x2="472" y2="449" stroke="#52b788" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+  <!-- ── OUTCOME ── -->
+  <rect x="56" y="484" width="788" height="36" rx="6" fill="#fff3cd" stroke="#ffc107" stroke-width="1"/>
+  <text x="450" y="498" text-anchor="middle" font-size="11" font-weight="bold" fill="#856404">Episode outcome</text>
+  <text x="450" y="513" text-anchor="middle" font-size="10" fill="#856404">success if agent reaches o_g within 50 steps  ·  else failure</text>
+
+  <!-- ── METRICS ── -->
+  <rect x="56" y="530" width="788" height="30" rx="6" fill="#d1ecf1" stroke="#0c5460" stroke-width="1"/>
+  <text x="450" y="551" text-anchor="middle" font-size="11" fill="#0c5460">Metrics averaged over all 50 episodes  →  written to  tworoom_results.txt</text>
+
+  <!-- ── arrowhead markers ── -->
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#4361ee"/>
+    </marker>
+    <marker id="arr2" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#7209b7"/>
+    </marker>
+  </defs>
+
+</svg>

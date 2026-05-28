@@ -1,23 +1,24 @@
 """Stage-2 training script for HierarchicalLeWM.
 
 Stage 1 (JEPA) is trained by train.py.  This script loads the resulting
-checkpoint, wraps it in HierarchicalLeWM, and runs the stage-2 teacher-
-forcing loop that jointly trains A_ψ and P^(2).
+checkpoint, wraps it in HierarchicalLeWMModule, and runs the stage-2
+teacher-forcing loop using PyTorch Lightning — supports 1 GPU or multi-GPU
+DDP transparently via ``trainer.devices: auto`` in the config.
 
 Usage
 -----
-# TwoRoom (default data)
+# TwoRoom (default data), single or multi-GPU depending on visible devices
 python train_hierarchical.py stage1_checkpoint=<path/to/lewm_epoch_100_object.ckpt>
 
 # Different dataset
 python train_hierarchical.py data=pusht stage1_checkpoint=<path>
 
-# Quick smoke-test
+# Quick smoke-test (CPU)
 python train_hierarchical.py stage1_checkpoint=<path> \\
-    stage2.n_epochs=2 loader.batch_size=8 wandb.enabled=False
+    trainer.max_epochs=2 loader.batch_size=8 \\
+    trainer.accelerator=cpu trainer.devices=1 wandb.enabled=False
 """
 
-import os
 import logging
 from functools import partial
 from pathlib import Path
@@ -25,13 +26,14 @@ from pathlib import Path
 py_log = logging.getLogger(__name__)
 
 import hydra
-import wandb
+import lightning as pl
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
+from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
-from hierarchical_lewm import HierarchicalLeWM, train_hierarchical_lewm
+from hierarchical_lewm import HierarchicalLeWM, HierarchicalLeWMModule
 from utils import get_column_normalizer, get_img_preprocessor
 
 
@@ -76,10 +78,8 @@ def run(cfg):
     ##       model              ##
     ##############################
 
-    py_log.info("STABLEWM_HOME set to %s", os.getenv('STABLEWM_HOME'))
-
     py_log.info("Loading stage-1 checkpoint from %s", cfg.stage1_checkpoint)
-    jepa = torch.load(cfg.stage1_checkpoint, map_location=cfg.device, weights_only=False)
+    jepa = torch.load(cfg.stage1_checkpoint, map_location="cpu", weights_only=False)
     jepa.eval()
 
     effective_act_dim = cfg.data.dataset.frameskip * cfg.wm.action_dim
@@ -100,8 +100,15 @@ def run(cfg):
         action_enc_heads=cfg.wm.action_enc_heads,
     )
 
+    module = HierarchicalLeWMModule(
+        model=model,
+        n_waypoints=cfg.wm.n_waypoints,
+        lr=cfg.stage2.lr,
+        freeze_encoder=cfg.stage2.freeze_encoder,
+    )
+
     ##########################
-    ##       training       ##
+    ##       logging        ##
     ##########################
 
     run_dir = Path(swm.data.utils.get_cache_dir(), cfg.get("subdir") or "")
@@ -110,31 +117,32 @@ def run(cfg):
     with open(run_dir / "config.yaml", "w") as f:
         OmegaConf.save(cfg, f)
 
-    device = cfg.device
-    py_log.info("Run directory: %s  device: %s", run_dir, device)
-
-    wandb_run = None
+    logger = None
     if cfg.wandb.enabled:
-        wandb_run = wandb.init(**OmegaConf.to_container(cfg.wandb.config, resolve=True))
-        wandb_run.config.update(OmegaConf.to_container(cfg, resolve=True))
+        logger = WandbLogger(**OmegaConf.to_container(cfg.wandb.config, resolve=True))
+        logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
 
-    model = train_hierarchical_lewm(
-        model=model,
-        dataloader=dataloader,
-        n_waypoints=cfg.wm.n_waypoints,
-        lr=cfg.stage2.lr,
-        n_epochs=cfg.stage2.n_epochs,
-        device=device,
-        freeze_encoder=cfg.stage2.freeze_encoder,
-        wandb_run=wandb_run,
+    ##########################
+    ##       training       ##
+    ##########################
+
+    trainer = pl.Trainer(
+        **OmegaConf.to_container(cfg.trainer, resolve=True),
+        logger=logger,
+        enable_checkpointing=False,
     )
 
-    out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
-    torch.save(model, out_path)
-    py_log.info("Saved hierarchical model to %s", out_path)
+    py_log.info("Run directory: %s", run_dir)
+    trainer.fit(module, dataloader)
 
-    if wandb_run is not None:
-        wandb_run.finish()
+    ##########################
+    ##        save          ##
+    ##########################
+
+    if trainer.is_global_zero:
+        out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
+        torch.save(module.model, out_path)
+        py_log.info("Saved hierarchical model to %s", out_path)
 
 
 if __name__ == "__main__":
