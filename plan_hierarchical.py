@@ -252,7 +252,7 @@ def get_episodes_length(dataset, episodes):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@hydra.main(version_base=None, config_path="./config/eval", config_name="hierarchical")
+@hydra.main(version_base=None, config_path="./config/eval", config_name="hierarchical_tworoom")
 def run(cfg: DictConfig):
     py_log.info("Hierarchical eval — checkpoint=%s device=%s", cfg.checkpoint, cfg.device)
 
