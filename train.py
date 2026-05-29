@@ -133,13 +133,7 @@ def run(cfg):
         'model_opt': {
             "modules": 'model',
             "optimizer": dict(cfg.optimizer),
-            "scheduler": {
-                "type": "LinearWarmupCosineAnnealingLR",
-                "warmup_steps": max(1, int(0.05 * max_epochs)),
-                "max_steps": max_epochs,
-                "warmup_start_lr": 0.0,
-                "eta_min": 0.0,
-            },
+            "scheduler": {"type": "LinearWarmupCosineAnnealingLR"},
             "interval": "epoch",
         },
     }
