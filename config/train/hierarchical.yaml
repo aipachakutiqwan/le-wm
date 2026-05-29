@@ -69,6 +69,11 @@ wm:
 # matching h_low=5 in the eval planner exactly.
 stage2_num_steps: 16
 
+precomputed_emb: false    # set true to load from {name}_emb.h5 (skip encoder at train time)
+precompute:
+  batch_size: 256
+  device: null            # null = auto-detect (cuda if available, else cpu)
+
 wandb:
   enabled: True
   config:

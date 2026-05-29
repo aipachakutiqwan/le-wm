@@ -1,0 +1,16 @@
+# @package _global_
+# Apple Silicon (MPS) local training.
+# num_workers=0: spawn-based DataLoader workers on macOS cannot share MPS/pinned storage.
+# pin_memory=false: MPS pinned allocator is incompatible with multiprocess pickling.
+
+trainer:
+  accelerator: mps
+  devices: 1
+  precision: 16-mixed
+  strategy: auto
+
+loader:
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  prefetch_factor: null

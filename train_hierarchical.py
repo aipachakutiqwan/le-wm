@@ -132,13 +132,22 @@ def run(cfg):
 
     with open_dict(cfg):
         cfg.data.dataset.num_steps = cfg.stage2_num_steps
+        if cfg.get("precomputed_emb", False):
+            cfg.data.dataset.name = f"{cfg.data.dataset.name}_emb"
+            cfg.data.dataset.keys_to_load = [
+                "emb" if k == "pixels" else k
+                for k in cfg.data.dataset.keys_to_load
+            ]
 
     dataset = swm.data.HDF5Dataset(**cfg.data.dataset, transform=None)
-    transforms = [get_img_preprocessor(source="pixels", target="pixels", img_size=cfg.img_size)]
+
+    transforms = []
+    if not cfg.get("precomputed_emb", False):
+        transforms.append(get_img_preprocessor(source="pixels", target="pixels", img_size=cfg.img_size))
 
     with open_dict(cfg):
         for col in cfg.data.dataset.keys_to_load:
-            if col.startswith("pixels"):
+            if col in ("pixels", "emb"):
                 continue
             normalizer = get_column_normalizer(dataset, col, col)
             transforms.append(normalizer)

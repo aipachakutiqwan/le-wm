@@ -316,12 +316,15 @@ class HierarchicalLeWM(nn.Module):
         -------
         dict with 'loss' (scalar), 'high_pred_emb', 'high_target_emb'
         """
-        pixels = obs["pixels"]                              # (B, T, C, H, W)
         actions = torch.nan_to_num(obs["action"], 0.0)     # (B, T, action_dim)
 
-        grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
-        with grad_ctx:
-            emb = self.jepa.encode({"pixels": pixels})["emb"]  # (B, T, embed_dim)
+        if "emb" in obs:
+            emb = obs["emb"]                                    # (B, T, embed_dim) pre-computed
+        else:
+            pixels = obs["pixels"]                              # (B, T, C, H, W)
+            grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
+            with grad_ctx:
+                emb = self.jepa.encode({"pixels": pixels})["emb"]  # (B, T, embed_dim)
 
         W = len(waypoint_idx)
         wp_emb = emb[:, waypoint_idx]      # (B, W, embed_dim)

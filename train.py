@@ -128,11 +128,18 @@ def run(cfg):
         pred_proj=predictor_proj,
     )
 
+    max_epochs = cfg.trainer.max_epochs
     optimizers = {
         'model_opt': {
             "modules": 'model',
             "optimizer": dict(cfg.optimizer),
-            "scheduler": {"type": "LinearWarmupCosineAnnealingLR"},
+            "scheduler": {
+                "type": "LinearWarmupCosineAnnealingLR",
+                "warmup_steps": max(1, int(0.05 * max_epochs)),
+                "max_steps": max_epochs,
+                "warmup_start_lr": 0.0,
+                "eta_min": 0.0,
+            },
             "interval": "epoch",
         },
     }
