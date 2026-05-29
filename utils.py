@@ -1,8 +1,11 @@
+import logging
 import numpy as np
 import torch
 from pathlib import Path
 from stable_pretraining import data as dt
 from lightning.pytorch.callbacks import Callback
+
+py_log = logging.getLogger(__name__)
 
 def get_img_preprocessor(source: str, target: str, img_size: int = 224):
     imagenet_stats = dt.dataset_stats.ImageNet
@@ -59,5 +62,6 @@ class ModelObjectCallBack(Callback):
     def _dump_model(self, model, path):
         try:
             torch.save(model, path)
+            py_log.info("Checkpoint saved: %s", path)
         except Exception as e:
             print(f"Error saving model object: {e}")
