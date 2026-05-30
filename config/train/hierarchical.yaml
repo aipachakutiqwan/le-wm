@@ -3,6 +3,7 @@ defaults:
   - data: tworoom
   - setup: null
 
+
 # Path to the stage-1 .ckpt saved by ModelObjectCallBack (torch.save of JEPA object).
 # Example: outputs/20240101_120000/lewm_epoch_100_object.ckpt
 stage1_checkpoint: ???
@@ -17,7 +18,15 @@ encoder_scale: tiny
 
 train_split: 0.9
 
-device: cuda 
+trainer:
+  max_epochs: ${stage2.n_epochs}
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  strategy: ddp_find_unused_parameters_true
 
 loader:
   batch_size: 64
@@ -29,8 +38,11 @@ loader:
 # Stage-2 optimisation
 stage2:
   lr: 1e-4
+  weight_decay: 0.05      # AdamW weight decay; helps close the train/val gap
   n_epochs: 50
   freeze_encoder: True    # keep E and P^(1) frozen; only A_ψ and P^(2) are trained
+  ss_max_prob: 0.5        # scheduled sampling: max probability of feeding back own prediction
+  ss_ramp_epochs: 30      # linearly ramp ss_prob from 0 → ss_max_prob over first 30 epochs
 
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.
@@ -38,19 +50,29 @@ wm:
   num_preds: 1
   history_size: 3
   embed_dim: 192          # must match the stage-1 embed_dim
-  n_waypoints: 3          # N interior waypoints (HWM default)
-  latent_action_dim: 4    # d_L — sweep this first when tuning
+  n_waypoints: 2          # N interior waypoints → n_seg = N+1 = 3 = H_high (eval)
+  latent_action_dim: 8    # d_L — doubled from 4; action_dim=2 * h_low=10 → 20 values → 8 dims
+  lambda_sigreg: 0.02      # SIGReg weight on P^(2) predicted waypoints (0 = disabled)
+                          # enables: 0.01–0.1; keeps predicted subgoals in Gaussian support
   high_depth: 6
   high_heads: 16
   high_mlp_dim: 2048
   high_num_frames: 8      # positional-embedding buffer; >= n_waypoints + 2
-  action_enc_hidden: 128
+  high_dropout: 0.1       # dropout in P^(2) — reduces train/val overfitting gap
+  action_enc_hidden: 256
   action_enc_depth: 2
   action_enc_heads: 4
+  action_enc_dropout: 0.1 # dropout in A_ψ — same purpose
 
-# Stage-2 needs longer windows than stage-1 (4 frames) so waypoints are meaningful.
-# The training script injects this into cfg.data.dataset.num_steps before dataset init.
-stage2_num_steps: 20
+# Trajectory length = H_high × h_low + 1 = 3 × 5 + 1 = 16.
+# Gives waypoints [0, 5, 10, 15] → three perfectly equal segments of 5 steps,
+# matching h_low=5 in the eval planner exactly.
+stage2_num_steps: 16
+
+precomputed_emb: false    # set true to load from {name}_emb.h5 (skip encoder at train time)
+precompute:
+  batch_size: 256
+  device: null            # null = auto-detect (cuda if available, else cpu)
 
 wandb:
   enabled: True

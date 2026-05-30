@@ -246,3 +246,5 @@ lewm/
 # assets
 assets/*.svg
 
+# lightning_logs
+lightning_logs

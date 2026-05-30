@@ -1,12 +1,12 @@
-"""Hierarchical LeWM — models and stage-2 training.
+"""Hierarchical LeWM — models and components.
 
 New components (jepa.py and module.py are not modified):
-  ActionEncoder       A_ψ  : action chunk  →  latent macro-action
-  HighLevelPredictor  P^(2): AR transformer over waypoint latents
-  HierarchicalLeWM        : wrapper with forward_low / forward_high + rollout helpers
-  sample_waypoints        : HWM-style waypoint sampler
-  train_hierarchical_lewm : stage-2 training driver
+  ActionEncoder      A_ψ  : action chunk  →  latent macro-action
+  HighLevelPredictor P^(2): AR transformer over waypoint latents
+  HierarchicalLeWM       : wrapper with forward_low / forward_high + rollout helpers
+  sample_waypoints       : HWM-style waypoint sampler
 
+Stage-2 training is handled by train_hierarchical.py.
 See hierarchical_plan.py for the two-level CEM-MPC planner.
 """
 
@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from jepa import JEPA
-from module import ARPredictor
+from module import ARPredictor, SIGReg
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -24,16 +24,14 @@ from module import ARPredictor
 
 
 def sample_waypoints(T: int, N: int = 3, device=None) -> torch.Tensor:
-    """N random interior indices plus the two fixed endpoints [0, T-1].
+    """N evenly spaced interior waypoints plus fixed endpoints [0, T-1].
 
     Returns a sorted 1-D tensor of shape (N+2,).
     Falls back to a full arange when N >= T-1 (very short trajectories).
     """
     if N >= T - 1:
         return torch.arange(T, device=device)
-    interior = torch.randperm(T - 2, device=device)[:N] + 1  # never 0 or T-1
-    endpoints = torch.tensor([0, T - 1], device=device)
-    return torch.cat([endpoints, interior]).sort().values
+    return torch.linspace(0, T - 1, N + 2, device=device).round().long()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -198,7 +196,7 @@ class HierarchicalLeWM(nn.Module):
 
     Training
     --------
-    Stage 1 — train the inner JEPA normally (see train.py / train_hierarchical_lewm).
+    Stage 1 — train the inner JEPA normally (see train.py).
     Stage 2 — freeze E and P^(1); jointly train A_ψ and P^(2) on the teacher-forcing
                waypoint loss L_tf = (1/N) Σ_k ‖ẑ_{t_{k+1}} − z_{t_{k+1}}‖_1.
 
@@ -215,6 +213,10 @@ class HierarchicalLeWM(nn.Module):
     latent_action_dim : d_L — HWM default 4 (sweep this first when tuning)
     n_waypoints       : N interior waypoints per trajectory (HWM default 3)
     history_size      : low-level context window size (must match stage-1 training)
+    lambda_sigreg     : weight for SIGReg on P^(2) predicted waypoints (0 = disabled).
+                        Encourages predicted subgoals to stay within the Gaussian
+                        support of the real latent space, mitigating infeasible subgoals.
+                        Recommended range: 0.01–0.1 (same order as stage-1 default).
     """
 
     def __init__(
@@ -225,6 +227,7 @@ class HierarchicalLeWM(nn.Module):
         latent_action_dim: int = 4,
         n_waypoints: int = 3,
         history_size: int = 3,
+        lambda_sigreg: float = 0.0,
         # high-level predictor knobs (mirror low-level defaults from train.py)
         high_depth: int = 6,
         high_heads: int = 16,
@@ -235,6 +238,8 @@ class HierarchicalLeWM(nn.Module):
         action_enc_hidden: int = 128,
         action_enc_depth: int = 2,
         action_enc_heads: int = 4,
+        action_enc_dropout: float = 0.0,
+        high_dropout: float = 0.0,
     ):
         super().__init__()
         self.jepa = jepa
@@ -242,6 +247,9 @@ class HierarchicalLeWM(nn.Module):
         self.n_waypoints = n_waypoints
         self.action_dim = action_dim
         self.history_size = history_size
+        self.lambda_sigreg = lambda_sigreg
+        if lambda_sigreg > 0.0:
+            self.sigreg = SIGReg()
 
         self.action_encoder_high = ActionEncoder(
             action_dim=action_dim,
@@ -249,6 +257,7 @@ class HierarchicalLeWM(nn.Module):
             latent_action_dim=latent_action_dim,
             depth=action_enc_depth,
             heads=action_enc_heads,
+            dropout=action_enc_dropout,
         )
 
         self.high_predictor = HighLevelPredictor(
@@ -259,7 +268,16 @@ class HierarchicalLeWM(nn.Module):
             depth=high_depth,
             heads=high_heads,
             mlp_dim=high_mlp_dim,
+            dropout=high_dropout,
         )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # JEPA must stay in eval mode throughout stage-2 training so that encoder
+        # dropout and any norm running-stats are not affected by Lightning's
+        # model.train() calls at the start of each epoch.
+        self.jepa.eval()
+        return self
 
     # ── Stage-1 forward ──────────────────────────────────────────────────────
 
@@ -274,6 +292,7 @@ class HierarchicalLeWM(nn.Module):
         obs: dict,
         waypoint_idx: torch.Tensor,
         freeze_encoder: bool = True,
+        ss_prob: float = 0.0,
     ) -> dict:
         """Teacher-forcing loss on waypoint latents (stage-2 objective).
 
@@ -287,17 +306,25 @@ class HierarchicalLeWM(nn.Module):
         obs            : batch dict with 'pixels' (B,T,C,H,W) and 'action' (B,T,A)
         waypoint_idx   : (W,) sorted frame indices; W = N_interior + 2
         freeze_encoder : block gradients through E and P^(1) (recommended)
+        ss_prob        : scheduled-sampling probability — at each AR step, replace the
+                         ground-truth input with the model's own previous prediction with
+                         this probability.  0.0 = pure teacher forcing (original behaviour);
+                         1.0 = fully autoregressive (identical to eval rollout).
+                         Ramp from 0 → ss_max_prob over training to close the train/eval gap.
 
         Returns
         -------
         dict with 'loss' (scalar), 'high_pred_emb', 'high_target_emb'
         """
-        pixels = obs["pixels"]                              # (B, T, C, H, W)
         actions = torch.nan_to_num(obs["action"], 0.0)     # (B, T, action_dim)
 
-        grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
-        with grad_ctx:
-            emb = self.jepa.encode({"pixels": pixels})["emb"]  # (B, T, embed_dim)
+        if "emb" in obs:
+            emb = obs["emb"]                                    # (B, T, embed_dim) pre-computed
+        else:
+            pixels = obs["pixels"]                              # (B, T, C, H, W)
+            grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
+            with grad_ctx:
+                emb = self.jepa.encode({"pixels": pixels})["emb"]  # (B, T, embed_dim)
 
         W = len(waypoint_idx)
         wp_emb = emb[:, waypoint_idx]      # (B, W, embed_dim)
@@ -313,14 +340,47 @@ class HierarchicalLeWM(nn.Module):
 
         macro_actions = torch.stack(macro_list, dim=1)   # (B, n_seg, d_L)
 
-        # P^(2): causal AR prediction — position k predicts waypoint k+1
-        pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
-        target_emb = wp_emb[:, 1:].detach()                             # (B, n_seg, D)
+        # P^(2): causal AR prediction — position k predicts waypoint k+1.
+        # With ss_prob > 0 (scheduled sampling), each AR step feeds back the model's
+        # own prediction instead of the ground truth with probability ss_prob.
+        # This matches the autoregressive rollout used at eval time.
+        if ss_prob <= 0.0:
+            # Pure teacher forcing — efficient single forward pass.
+            pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
+        else:
+            # Scheduled sampling — step-by-step, same pattern as _rollout_high.
+            preds = []
+            z_seq = wp_emb[:, :1]                                    # (B, 1, D) — ground truth z_0
+            for k in range(n_seg):
+                pred_k = self.high_predictor(
+                    z_seq, macro_actions[:, : k + 1]
+                )[:, -1:]                                             # (B, 1, D)
+                preds.append(pred_k)
+                if k < n_seg - 1:
+                    # Bernoulli draw: use model prediction or ground truth for next input.
+                    use_pred = torch.rand(1, device=wp_emb.device).item() < ss_prob
+                    next_z = pred_k.detach() if use_pred else wp_emb[:, k + 1 : k + 2]
+                    z_seq = torch.cat([z_seq, next_z], dim=1)        # (B, k+2, D)
+            pred_emb = torch.cat(preds, dim=1)                       # (B, n_seg, D)
 
-        loss = F.l1_loss(pred_emb, target_emb)
+        target_emb = wp_emb[:, 1:].detach()                         # (B, n_seg, D)
+
+        loss_tf = F.l1_loss(pred_emb, target_emb)
+
+        if self.lambda_sigreg > 0.0:
+            # SIGReg on predicted waypoints keeps P^(2) outputs within the Gaussian
+            # support of the real latent space, mitigating infeasible subgoals.
+            # SIGReg expects (T, B, D); pred_emb is (B, n_seg, D).
+            loss_reg = self.sigreg(pred_emb.permute(1, 0, 2))
+            loss = loss_tf + self.lambda_sigreg * loss_reg
+        else:
+            loss = loss_tf
+            loss_reg = pred_emb.new_zeros(1).squeeze()
 
         return {
             "loss": loss,
+            "loss_tf": loss_tf,
+            "loss_reg": loss_reg,
             "high_pred_emb": pred_emb,
             "high_target_emb": target_emb,
         }
@@ -370,72 +430,3 @@ class HierarchicalLeWM(nn.Module):
 
         return z[:, -1]   # (n, D)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Stage-2 training driver
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def train_hierarchical_lewm(
-    model: HierarchicalLeWM,
-    dataloader,
-    n_waypoints: int = 3,
-    lr: float = 1e-4,
-    n_epochs: int = 10,
-    device: str = "cuda",
-    freeze_encoder: bool = True,
-    wandb_run=None,
-) -> HierarchicalLeWM:
-    """Jointly optimise A_ψ and P^(2) on L_tf (stage 2).
-
-    Stage 1 (training jepa) is handled by the existing train.py.
-    Load the stage-1 checkpoint into a JEPA instance, wrap it in
-    HierarchicalLeWM, then call this function.
-
-    Parameters
-    ----------
-    model          : HierarchicalLeWM with a stage-1-trained inner jepa
-    dataloader     : yields batches with 'pixels' and 'action' keys
-    n_waypoints    : N interior waypoints per trajectory (HWM default 3)
-    lr             : AdamW learning rate for stage-2 parameters
-    n_epochs       : number of stage-2 epochs
-    device         : target device string
-    freeze_encoder : if True, no gradients flow through E or P^(1)
-    """
-    model = model.to(device)
-
-    # only the two new modules are optimised in stage 2
-    stage2_params = (
-        list(model.action_encoder_high.parameters())
-        + list(model.high_predictor.parameters())
-    )
-    optimizer = torch.optim.AdamW(stage2_params, lr=lr)
-
-    if freeze_encoder:
-        for p in model.jepa.parameters():
-            p.requires_grad_(False)
-
-    model.train()
-    for epoch in range(n_epochs):
-        epoch_loss = 0.0
-        for batch in dataloader:
-            batch = {
-                k: v.to(device) if torch.is_tensor(v) else v
-                for k, v in batch.items()
-            }
-            T = batch["pixels"].shape[1]
-            wp_idx = sample_waypoints(T, N=n_waypoints, device=device)
-
-            out = model.forward_high(batch, wp_idx, freeze_encoder=freeze_encoder)
-
-            optimizer.zero_grad()
-            out["loss"].backward()
-            optimizer.step()
-            epoch_loss += out["loss"].item()
-
-        avg_loss = epoch_loss / len(dataloader)
-        print(f"epoch {epoch + 1}/{n_epochs}  stage-2 L_tf: {avg_loss:.5f}")
-        if wandb_run is not None:
-            wandb_run.log({"stage2/loss": avg_loss}, step=epoch + 1)
-
-    return model

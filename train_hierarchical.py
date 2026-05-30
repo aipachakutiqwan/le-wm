@@ -19,27 +19,110 @@ python train_hierarchical.py stage1_checkpoint=<path> \\
 
 import os
 import logging
-from functools import partial
 from pathlib import Path
 
 py_log = logging.getLogger(__name__)
 
 import hydra
-import wandb
+import lightning as pl
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
+from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
-from hierarchical_lewm import HierarchicalLeWM, train_hierarchical_lewm
-from utils import get_column_normalizer, get_img_preprocessor
+from hierarchical_lewm import HierarchicalLeWM, sample_waypoints
+from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Lightning module
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class HierarchicalStage2Module(pl.LightningModule):
+    """Lightning wrapper for stage-2 training of HierarchicalLeWM.
+
+    Only A_ψ and P^(2) are optimised; E and P^(1) are frozen.
+    Mirrors the spt.Module pattern used by train.py so multi-GPU DDP is
+    handled transparently by pl.Trainer.
+    """
+
+    def __init__(self, model: HierarchicalLeWM, cfg):
+        super().__init__()
+        self.model = model
+        self.cfg = cfg
+
+    def on_fit_start(self):
+        if self.cfg.stage2.freeze_encoder:
+            for p in self.model.jepa.parameters():
+                p.requires_grad_(False)
+
+    def _step(self, batch, train: bool = False):
+        T = batch["pixels"].shape[1]
+        wp_idx = sample_waypoints(T, N=self.cfg.wm.n_waypoints, device=self.device)
+        ss_prob = 0.0
+        if train:
+            ss_max = self.cfg.stage2.get("ss_max_prob", 0.0)
+            if ss_max > 0.0:
+                ramp = self.cfg.stage2.get("ss_ramp_epochs", self.cfg.stage2.n_epochs)
+                ss_prob = ss_max * min(1.0, self.current_epoch / ramp)
+        return self.model.forward_high(
+            batch, wp_idx,
+            freeze_encoder=self.cfg.stage2.freeze_encoder,
+            ss_prob=ss_prob,
+        )
+
+    def training_step(self, batch, batch_idx):
+        out = self._step(batch, train=True)
+        self.log("stage2/train_loss", out["loss"], on_step=True, on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("stage2/train_loss_tf", out["loss_tf"], on_step=True, on_epoch=True, sync_dist=True)
+        if self.cfg.wm.lambda_sigreg > 0.0:
+            self.log("stage2/train_loss_reg", out["loss_reg"], on_step=True, on_epoch=True, sync_dist=True)
+        ss_max = self.cfg.stage2.get("ss_max_prob", 0.0)
+        if ss_max > 0.0 and batch_idx == 0:
+            ramp = self.cfg.stage2.get("ss_ramp_epochs", self.cfg.stage2.n_epochs)
+            self.log("stage2/ss_prob", ss_max * min(1.0, self.current_epoch / ramp), on_step=False, on_epoch=True)
+        return out["loss"]
+
+    def validation_step(self, batch, batch_idx):
+        out = self._step(batch)
+        self.log("stage2/val_loss", out["loss"], on_step=False, on_epoch=True, sync_dist=True, prog_bar=True)
+        self.log("stage2/val_loss_tf", out["loss_tf"], on_step=False, on_epoch=True, sync_dist=True)
+        if self.cfg.wm.lambda_sigreg > 0.0:
+            self.log("stage2/val_loss_reg", out["loss_reg"], on_step=False, on_epoch=True, sync_dist=True)
+
+    def configure_optimizers(self):
+        params = (
+            list(self.model.action_encoder_high.parameters())
+            + list(self.model.high_predictor.parameters())
+        )
+        opt = torch.optim.AdamW(params, lr=self.cfg.stage2.lr,
+                                weight_decay=self.cfg.stage2.get("weight_decay", 0.01))
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            opt,
+            max_lr=self.cfg.stage2.lr,
+            total_steps=self.trainer.estimated_stepping_batches,
+            pct_start=0.05,       # 5% warmup
+            anneal_strategy="cos",
+            final_div_factor=100, # lr decays to max_lr / 100
+        )
+        return {"optimizer": opt, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
 def run(cfg):
     py_log.info(
-        "Hierarchical stage-2 training — data=%s checkpoint=%s",
+        "Hierarchical stage-2 training — data=%s setup=%s wandb=%s checkpoint=%s",
         cfg.data.dataset.name,
+        cfg.get("setup", "default"),
+        cfg.wandb.enabled,
         cfg.stage1_checkpoint,
     )
 
@@ -49,13 +132,22 @@ def run(cfg):
 
     with open_dict(cfg):
         cfg.data.dataset.num_steps = cfg.stage2_num_steps
+        if cfg.get("precomputed_emb", False):
+            cfg.data.dataset.name = f"{cfg.data.dataset.name}_emb"
+            cfg.data.dataset.keys_to_load = [
+                "emb" if k == "pixels" else k
+                for k in cfg.data.dataset.keys_to_load
+            ]
 
     dataset = swm.data.HDF5Dataset(**cfg.data.dataset, transform=None)
-    transforms = [get_img_preprocessor(source="pixels", target="pixels", img_size=cfg.img_size)]
+
+    transforms = []
+    if not cfg.get("precomputed_emb", False):
+        transforms.append(get_img_preprocessor(source="pixels", target="pixels", img_size=cfg.img_size))
 
     with open_dict(cfg):
         for col in cfg.data.dataset.keys_to_load:
-            if col.startswith("pixels"):
+            if col in ("pixels", "emb"):
                 continue
             normalizer = get_column_normalizer(dataset, col, col)
             transforms.append(normalizer)
@@ -65,21 +157,26 @@ def run(cfg):
     dataset.transform = transform
 
     rnd_gen = torch.Generator().manual_seed(cfg.seed)
-    train_set, _ = spt.data.random_split(
+    train_set, val_set = spt.data.random_split(
         dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
     )
     dataloader = torch.utils.data.DataLoader(
         train_set, **cfg.loader, shuffle=True, drop_last=True, generator=rnd_gen
     )
+    val_dataloader = torch.utils.data.DataLoader(
+        val_set, **cfg.loader, shuffle=False, drop_last=False
+    )
+    py_log.info("Dataset split — train: %d  val: %d", len(train_set), len(val_set))
 
     ##############################
     ##       model              ##
     ##############################
 
     py_log.info("STABLEWM_HOME set to %s", os.getenv('STABLEWM_HOME'))
-
     py_log.info("Loading stage-1 checkpoint from %s", cfg.stage1_checkpoint)
-    jepa = torch.load(cfg.stage1_checkpoint, map_location=cfg.device, weights_only=False)
+    # map_location="cpu" is required for DDP: each rank loads to CPU first,
+    # then Lightning moves parameters to the correct device.
+    jepa = torch.load(cfg.stage1_checkpoint, map_location="cpu", weights_only=False)
     jepa.eval()
 
     effective_act_dim = cfg.data.dataset.frameskip * cfg.wm.action_dim
@@ -91,6 +188,7 @@ def run(cfg):
         latent_action_dim=cfg.wm.latent_action_dim,
         n_waypoints=cfg.wm.n_waypoints,
         history_size=cfg.wm.history_size,
+        lambda_sigreg=cfg.wm.lambda_sigreg,
         high_depth=cfg.wm.high_depth,
         high_heads=cfg.wm.high_heads,
         high_mlp_dim=cfg.wm.high_mlp_dim,
@@ -98,43 +196,61 @@ def run(cfg):
         action_enc_hidden=cfg.wm.action_enc_hidden,
         action_enc_depth=cfg.wm.action_enc_depth,
         action_enc_heads=cfg.wm.action_enc_heads,
+        action_enc_dropout=cfg.wm.get("action_enc_dropout", 0.0),
+        high_dropout=cfg.wm.get("high_dropout", 0.0),
+    )
+
+    total_params = sum(p.numel() for p in model.parameters())
+    stage2_params = sum(
+        p.numel() for p in list(model.action_encoder_high.parameters()) + list(model.high_predictor.parameters())
+    )
+    py_log.info(
+        "Model — total params: %d  stage-2 trainable: %d  frozen: %d  "
+        "embed_dim: %d  latent_action_dim: %d  n_waypoints: %d",
+        total_params, stage2_params, total_params - stage2_params,
+        cfg.wm.embed_dim, cfg.wm.latent_action_dim, cfg.wm.n_waypoints,
     )
 
     ##########################
     ##       training       ##
     ##########################
 
-    run_dir = Path(swm.data.utils.get_cache_dir(), cfg.get("subdir") or "")
+    run_id = cfg.get("subdir") or ""
+    run_dir = Path(swm.data.utils.get_cache_dir(), run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     with open(run_dir / "config.yaml", "w") as f:
         OmegaConf.save(cfg, f)
 
-    device = cfg.device
-    py_log.info("Run directory: %s  device: %s", run_dir, device)
+    # Re-enable submodule logger disabled by Hydra's hydra_logging phase.
+    logging.getLogger("hierarchical_lewm").disabled = False
+    py_log.info("Run Directory: %s", run_dir)
 
-    wandb_run = None
+    logger = None
     if cfg.wandb.enabled:
-        wandb_run = wandb.init(**OmegaConf.to_container(cfg.wandb.config, resolve=True))
-        wandb_run.config.update(OmegaConf.to_container(cfg, resolve=True))
+        logger = WandbLogger(**cfg.wandb.config)
+        logger.log_hyperparams(OmegaConf.to_container(cfg))
 
-    model = train_hierarchical_lewm(
-        model=model,
-        dataloader=dataloader,
-        n_waypoints=cfg.wm.n_waypoints,
-        lr=cfg.stage2.lr,
-        n_epochs=cfg.stage2.n_epochs,
-        device=device,
-        freeze_encoder=cfg.stage2.freeze_encoder,
-        wandb_run=wandb_run,
+    lm = HierarchicalStage2Module(model, cfg)
+    data_module = spt.data.DataModule(train=dataloader, val=val_dataloader)
+
+    object_dump_callback = ModelObjectCallBack(
+        dirpath=run_dir, filename=cfg.output_model_name, epoch_interval=1,
     )
 
-    out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
-    torch.save(model, out_path)
-    py_log.info("Saved hierarchical model to %s", out_path)
+    trainer = pl.Trainer(
+        **cfg.trainer,
+        callbacks=[object_dump_callback],
+        num_sanity_val_steps=1,
+        logger=logger,
+        enable_checkpointing=True,
+    )
+    trainer.fit(lm, datamodule=data_module)
 
-    if wandb_run is not None:
-        wandb_run.finish()
+    if trainer.is_global_zero:
+        out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
+        torch.save(lm.model, out_path)
+        py_log.info("Training complete — checkpoint saved to %s", out_path)
 
 
 if __name__ == "__main__":

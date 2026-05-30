@@ -128,6 +128,7 @@ def run(cfg):
         pred_proj=predictor_proj,
     )
 
+    max_epochs = cfg.trainer.max_epochs
     optimizers = {
         'model_opt': {
             "modules": 'model',
