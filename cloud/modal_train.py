@@ -234,6 +234,47 @@ def eval_job(
 
 
 # ---------------------------------------------------------------------------
+# Hierarchical eval (stage 2)
+# ---------------------------------------------------------------------------
+
+
+@app.function(
+    image=TRAIN_IMAGE,
+    gpu=EVAL_GPU,
+    volumes={"/stablewm-home": volume},
+    timeout=60 * 60 * 2,
+    retries=0,
+)
+def eval_hierarchical(
+    checkpoint: str,
+    overrides: Optional[list[str]] = None,
+) -> None:
+    """Run plan_hierarchical.py inside the container on an A10G.
+
+    Args:
+        checkpoint: Absolute path to the hierarchical .ckpt inside /stablewm-home.
+                    e.g. "/stablewm-home/hwm_tworoom/<run_id>/<run_id>/hierarchical_lewm_best_object.ckpt"
+        overrides:  List of Hydra overrides, e.g. ["eval.num_eval=10"]
+    """
+    cmd = [
+        "python", "plan_hierarchical.py",
+        f"checkpoint={checkpoint}",
+        "device=cuda",
+    ]
+    if overrides:
+        cmd += overrides
+
+    print(f"[modal] running: {' '.join(cmd)}", flush=True)
+    result = subprocess.run(cmd, cwd="/app", check=False)
+
+    volume.commit()  # persist hierarchical_results.txt next to the checkpoint
+
+    if result.returncode != 0:
+        print(f"[modal] hierarchical eval failed with exit code {result.returncode}", flush=True)
+        sys.exit(result.returncode)
+
+
+# ---------------------------------------------------------------------------
 # Hierarchical training (stage 2)
 # ---------------------------------------------------------------------------
 
@@ -451,3 +492,34 @@ def train_hier(
         overrides=override_list,
     )
     print(f"[local] spawned Modal call: {call.object_id}  (monitor via wandb / Modal dashboard)")
+
+@app.local_entrypoint()
+def eval_hier(
+    checkpoint: str,
+    overrides: str = "",
+):
+    """Submit a hierarchical planning eval job to Modal (A10G). Set LEWM_TAG env var to select the image.
+
+    Results are written to hierarchical_results.txt next to the checkpoint in the Modal volume.
+    Download with:
+        modal volume get lewm-data <run_id>/hierarchical_results.txt ./
+
+    Args:
+        checkpoint: Absolute path inside /stablewm-home.
+                    e.g. "/stablewm-home/hwm_tworoom/<run_id>/<run_id>/hierarchical_lewm_best_object.ckpt"
+        overrides:  Comma-separated Hydra overrides
+                    e.g. "eval.num_eval=10,plan.H_high=1"
+    """
+    if not _tag:
+        raise SystemExit(
+            "LEWM_TAG env var is not set. "
+            "Use ./devtools.py eval_hierarchical_modal <tag> --checkpoint <path> "
+            "or: LEWM_TAG=<tag> modal run cloud/modal_train.py::eval_hier --checkpoint <path>"
+        )
+
+    override_list = [o.strip() for o in overrides.split(",") if o.strip()]
+
+    print(f"[local] submitting hierarchical eval — image: {_tag}, checkpoint: {checkpoint}")
+    print(f"[local] overrides: {override_list}")
+
+    eval_hierarchical.remote(checkpoint=checkpoint, overrides=override_list)
