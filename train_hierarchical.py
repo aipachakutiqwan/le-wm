@@ -291,21 +291,27 @@ def run(cfg):
         latent_action_dim=cfg.wm.latent_action_dim,
         n_waypoints=cfg.wm.n_waypoints,
         history_size=cfg.wm.history_size,
+        lambda_sigreg=cfg.wm.get("lambda_sigreg", 0.0),
         high_depth=cfg.wm.high_depth,
         high_heads=cfg.wm.high_heads,
         high_mlp_dim=cfg.wm.high_mlp_dim,
         high_num_frames=cfg.wm.high_num_frames,
+        high_dropout=cfg.wm.get("high_dropout", 0.0),
         action_enc_hidden=cfg.wm.action_enc_hidden,
         action_enc_depth=cfg.wm.action_enc_depth,
         action_enc_heads=cfg.wm.action_enc_heads,
+        action_enc_dropout=cfg.wm.get("action_enc_dropout", 0.0),
     )
 
     module = HierarchicalLeWMModule(
         model=model,
         n_waypoints=cfg.wm.n_waypoints,
         lr=cfg.stage2.lr,
+        weight_decay=cfg.stage2.get("weight_decay", 0.0),
         freeze_encoder=cfg.stage2.freeze_encoder,
         compile_model=cfg.stage2.get("compile", True),
+        ss_max_prob=cfg.stage2.get("ss_max_prob", 0.0),
+        ss_ramp_epochs=cfg.stage2.get("ss_ramp_epochs", 30),
     )
 
     ##########################

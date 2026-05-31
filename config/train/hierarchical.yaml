@@ -38,9 +38,12 @@ loader:
 # Stage-2 optimisation
 stage2:
   lr: 5e-4
+  weight_decay: 0.05
   n_epochs: 10
   freeze_encoder: True           # keep E and P^(1) frozen; only A_ψ and P^(2) are trained
   compile: True                  # torch.compile ActionEncoder + HighLevelPredictor (PyTorch 2+)
+  ss_max_prob: 0.5               # scheduled sampling: max prob of feeding back own prediction
+  ss_ramp_epochs: 30             # linearly ramp ss_prob 0 → ss_max_prob over first N epochs
 
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.
@@ -50,13 +53,16 @@ wm:
   embed_dim: 192          # must match the stage-1 embed_dim
   n_waypoints: 4          # N interior waypoints (6 total, matches PLDM Appendix B.4)
   latent_action_dim: 8    # d_L — matches PLDM Appendix B.4
+  lambda_sigreg: 0.02     # SIGReg weight on P^(2) predicted waypoints (0 = disabled)
   high_depth: 6
   high_heads: 16
   high_mlp_dim: 2048
   high_num_frames: 8      # positional-embedding buffer; >= n_waypoints + 2
+  high_dropout: 0.1
   action_enc_hidden: 128
   action_enc_depth: 2
   action_enc_heads: 4
+  action_enc_dropout: 0.1
 
 # Stage-2 needs longer windows than stage-1 (4 frames) so waypoints are meaningful.
 # The training script injects this into cfg.data.dataset.num_steps before dataset init.
