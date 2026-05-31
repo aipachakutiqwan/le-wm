@@ -243,7 +243,7 @@ def eval_job(
     gpu=GPU,
     volumes={"/stablewm-home": volume},
     secrets=[modal.Secret.from_name("wandb-secret")],
-    timeout=60 * 60 * 16,
+    timeout=60 * 60 * 20,
     retries=0,
 )
 def train_hierarchical(
@@ -370,7 +370,10 @@ def main(
     print(f"[local] submitting job — image: {_tag}, data: {data}, setup: {setup}")
     print(f"[local] overrides: {override_list}")
 
-    train.remote(data=data, setup=setup, overrides=override_list)
+    # .spawn() = fire-and-forget; survives local client disconnects under --detach.
+    # .remote() is cancelled when the local caller disconnects even in detached apps.
+    call = train.spawn(data=data, setup=setup, overrides=override_list)
+    print(f"[local] spawned Modal call: {call.object_id}  (monitor via wandb / Modal dashboard)")
 
 
 @app.local_entrypoint()
@@ -439,9 +442,12 @@ def train_hier(
 
     print(f"[local] submitting hierarchical job — image: {_tag}, checkpoint: {stage1_checkpoint}, setup: {setup}")
     print(f"[local] overrides: {override_list}")
-    train_hierarchical.remote(
+    # .spawn() = fire-and-forget; survives local client disconnects under --detach.
+    # .remote() is cancelled when the local caller disconnects even in detached apps.
+    call = train_hierarchical.spawn(
         stage1_checkpoint=stage1_checkpoint,
         data=data,
         setup=setup,
         overrides=override_list,
     )
+    print(f"[local] spawned Modal call: {call.object_id}  (monitor via wandb / Modal dashboard)")

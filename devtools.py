@@ -211,7 +211,7 @@ class DevTools:
             overrides_str = ",".join(overrides)
 
         cmd = [
-            "modal", "run", str(REPO_ROOT / "cloud" / "modal_train.py"),
+            "modal", "run", "--detach", str(REPO_ROOT / "cloud" / "modal_train.py"),
             "--data", data,
             "--setup", setup,
         ]
@@ -286,7 +286,7 @@ class DevTools:
             overrides_str = ",".join(overrides)
 
         cmd = [
-            "modal", "run",
+            "modal", "run", "--detach",
             f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::train_hier",
             "--stage1-checkpoint", stage1_checkpoint,
             "--data", data,
