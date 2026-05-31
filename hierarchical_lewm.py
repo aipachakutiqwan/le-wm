@@ -393,6 +393,7 @@ class HierarchicalLeWM(nn.Module):
             "loss_kl": loss_kl,
             "high_pred_emb": pred_emb,
             "high_target_emb": target_emb,
+            "macro_actions": macro_actions,
         }
 
     # ── Rollout helpers (called by hierarchical_plan.plan) ────────────────────
@@ -520,7 +521,8 @@ def train_hierarchical_lewm(
         else:
             tf_prob = 1.0
 
-        epoch_loss = epoch_pred = epoch_var = 0.0
+        epoch_loss = epoch_pred = epoch_var = epoch_kl = 0.0
+        epoch_mac_absmean = epoch_mac_std = 0.0
         for batch in dataloader:
             batch = {
                 k: v.to(device) if torch.is_tensor(v) else v
@@ -536,31 +538,49 @@ def train_hierarchical_lewm(
 
             optimizer.zero_grad()
             out["loss"].backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(stage2_params, float("inf"))
             optimizer.step()
 
             loss_val = out["loss"].item()
             pred_val = out["loss_pred"].item()
             var_val  = out["loss_var"].item()
+            kl_val   = out["loss_kl"].item()
+            # A_ψ macro-action distribution vs the planner's N(0,1) prior — what the KL
+            # term actually steers. |mean| → 0 and std → 1 means the moment-matching worked.
+            with torch.no_grad():
+                mac = out["macro_actions"]                       # (B, n_seg, d_L)
+                mac_absmean = mac.mean(dim=(0, 1)).abs().mean().item()
+                mac_std = mac.std(dim=(0, 1)).mean().item()
             epoch_loss += loss_val
             epoch_pred += pred_val
             epoch_var  += var_val
+            epoch_kl   += kl_val
+            epoch_mac_absmean += mac_absmean
+            epoch_mac_std     += mac_std
             global_step += 1
 
             if wandb_run is not None and global_step % log_every_n_steps == 0:
                 wandb_run.log({
-                    "stage2/loss":      loss_val,
-                    "stage2/loss_pred": pred_val,
-                    "stage2/loss_var":  var_val,
+                    "stage2/loss":          loss_val,
+                    "stage2/loss_pred":     pred_val,
+                    "stage2/loss_var":      var_val,
+                    "stage2/loss_kl":       kl_val,
+                    "stage2/macro_absmean": mac_absmean,
+                    "stage2/macro_std":     mac_std,
+                    "stage2/grad_norm":     grad_norm.item(),
                 }, step=global_step)
 
         n = len(dataloader)
         epoch_metrics = {
-            "stage2/epoch_loss":      epoch_loss / n,
-            "stage2/epoch_loss_pred": epoch_pred / n,
-            "stage2/epoch_loss_var":  epoch_var  / n,
-            "stage2/epoch":           epoch + 1,
-            "stage2/tf_prob":         tf_prob,
-            "stage2/lr":              scheduler.get_last_lr()[0],
+            "stage2/epoch_loss":         epoch_loss / n,
+            "stage2/epoch_loss_pred":    epoch_pred / n,
+            "stage2/epoch_loss_var":     epoch_var  / n,
+            "stage2/epoch_loss_kl":      epoch_kl   / n,
+            "stage2/epoch_macro_absmean": epoch_mac_absmean / n,
+            "stage2/epoch_macro_std":     epoch_mac_std / n,
+            "stage2/epoch":              epoch + 1,
+            "stage2/tf_prob":            tf_prob,
+            "stage2/lr":                 scheduler.get_last_lr()[0],
         }
         scheduler.step()
 
@@ -573,6 +593,7 @@ def train_hierarchical_lewm(
             val_str = (
                 f"  | val_loss: {val_metrics['stage2/val_loss']:.5f}  "
                 f"val_pred: {val_metrics['stage2/val_loss_pred']:.5f}  "
+                f"val_kl: {val_metrics['stage2/val_loss_kl']:.5f}  "
                 f"val_var: {val_metrics['stage2/val_loss_var']:.5f}"
             )
 
@@ -587,7 +608,9 @@ def train_hierarchical_lewm(
 
         print(
             f"epoch {epoch + 1}/{n_epochs}  "
-            f"loss: {epoch_loss/n:.5f}  pred: {epoch_pred/n:.5f}  var: {epoch_var/n:.5f}"
+            f"loss: {epoch_loss/n:.5f}  pred: {epoch_pred/n:.5f}  "
+            f"kl: {epoch_kl/n:.5f}  var: {epoch_var/n:.5f}  "
+            f"macro(|mean|/std): {epoch_mac_absmean/n:.3f}/{epoch_mac_std/n:.3f}"
             f"{val_str}"
         )
         if wandb_run is not None:
@@ -637,7 +660,7 @@ def _validate_hierarchical(
     """
     was_training = model.training
     model.eval()
-    val_loss = val_pred = val_var = 0.0
+    val_loss = val_pred = val_var = val_kl = 0.0
     for batch in val_dataloader:
         batch = {
             k: v.to(device) if torch.is_tensor(v) else v
@@ -649,6 +672,7 @@ def _validate_hierarchical(
         val_loss += out["loss"].item()
         val_pred += out["loss_pred"].item()
         val_var  += out["loss_var"].item()
+        val_kl   += out["loss_kl"].item()
 
     if was_training:
         model.train()
@@ -658,4 +682,5 @@ def _validate_hierarchical(
         "stage2/val_loss":      val_loss / nv,
         "stage2/val_loss_pred": val_pred / nv,
         "stage2/val_loss_var":  val_var  / nv,
+        "stage2/val_loss_kl":   val_kl   / nv,
     }
