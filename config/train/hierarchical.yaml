@@ -26,13 +26,13 @@ trainer:
   precision: bf16-mixed
   log_every_n_steps: 1
   strategy: ddp_find_unused_parameters_false
-  accumulate_grad_batches: 1   # increase to simulate larger batch without more GPUs
+  accumulate_grad_batches: 2   # effective batch = batch_size × world_size × accum = 512×2×2 = 2048
 
 loader:
-  batch_size: 64
-  num_workers: 6
+  batch_size: 512
+  num_workers: 12
   persistent_workers: True
-  prefetch_factor: 3
+  prefetch_factor: 4
   pin_memory: True
 
 # Stage-2 optimisation
