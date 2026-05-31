@@ -48,11 +48,12 @@ def cem(
     (*shape,) optimised mean
     """
     n_elites = max(1, int(n_samples * elite_frac))
+    eps = torch.empty(n_samples, *mu.shape, device=mu.device)
     for _ in range(n_iters):
-        eps = torch.randn(n_samples, *mu.shape, device=mu.device)
+        eps.normal_()
         candidates = mu.unsqueeze(0) + std.unsqueeze(0) * eps   # (S, *shape)
         costs = cost_fn(candidates)                              # (S,)
-        elite_idx = costs.argsort()[:n_elites]
+        elite_idx = torch.topk(costs, n_elites, largest=False).indices
         elites = candidates[elite_idx]
         mu = elites.mean(0)
         std = elites.std(0).clamp(min=0.1)
@@ -123,11 +124,13 @@ def plan(
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
     # best_mac: (H_high, d_L)
 
-    outer_best_cost = outer_cost(best_mac.unsqueeze(0)).item()
-    py_log.debug("  outer CEM done — best cost: %.4f", outer_best_cost)
+    # Single rollout: reuse subgoals for both the debug cost and z_sg.
+    best_subgoals = model._rollout_high(z_init, best_mac.unsqueeze(0))  # (1, H_high, D)
+    py_log.debug("  outer CEM done — best cost: %.4f",
+                 (best_subgoals[0, -1] - z_goal).abs().sum().item())
 
     # ── Derive first subgoal ──────────────────────────────────────────────────
-    z_sg = model._rollout_high(z_init, best_mac.unsqueeze(0))[:, 0].squeeze(0)  # (D,)
+    z_sg = best_subgoals[0, 0]  # (D,)
 
     # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
@@ -141,8 +144,9 @@ def plan(
     best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters)
     # best_act: (h_low, action_dim)
 
-    inner_best_cost = inner_cost(best_act.unsqueeze(0)).item()
-    py_log.debug("  inner CEM done — best cost: %.4f", inner_best_cost)
+    if py_log.isEnabledFor(logging.DEBUG):
+        py_log.debug("  inner CEM done — best cost: %.4f",
+                     inner_cost(best_act.unsqueeze(0)).item())
 
     return best_act[0]   # first primitive action: (action_dim,)
 
@@ -178,11 +182,12 @@ def cem_batched(
     E = mu.shape[0]
     n_elites = max(1, int(n_samples * elite_frac))
     e_idx = torch.arange(E, device=mu.device)
+    eps = torch.empty(E, n_samples, *mu.shape[1:], device=mu.device)
     for _ in range(n_iters):
-        eps = torch.randn(E, n_samples, *mu.shape[1:], device=mu.device)
+        eps.normal_()
         candidates = mu.unsqueeze(1) + std.unsqueeze(1) * eps        # (E, S, *shape)
         costs = cost_fn(candidates)                                   # (E, S)
-        elite_idx = costs.argsort(dim=1)[:, :n_elites]               # (E, n_elites)
+        elite_idx = torch.topk(costs, n_elites, dim=1, largest=False).indices  # (E, n_elites)
         elites = candidates[e_idx.unsqueeze(1), elite_idx]            # (E, n_elites, *shape)
         mu = elites.mean(dim=1)
         std = elites.std(dim=1).clamp(min=0.1)
@@ -240,12 +245,15 @@ def plan_batched(
         return (z_last - z_goal.unsqueeze(1)).abs().sum(-1)           # (E, S)
 
     best_mac = cem_batched(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
+
+    # Single rollout: reuse subgoals for both the debug cost and z_sg.
+    best_subgoals = model._rollout_high(z_init, best_mac)             # (E, H_high, D)
     if py_log.isEnabledFor(logging.DEBUG):
         py_log.debug("  [batched] outer CEM done — mean best cost: %.4f",
-                     outer_cost(best_mac.unsqueeze(1)).mean().item())
+                     (best_subgoals[:, -1] - z_goal).abs().sum(-1).mean().item())
 
     # ── Derive first subgoal per environment ───────────────────────────────────
-    z_sg = model._rollout_high(z_init, best_mac)[:, 0]               # (E, D)
+    z_sg = best_subgoals[:, 0]                                        # (E, D)
 
     # ── Inner CEM ──────────────────────────────────────────────────────────────
     mu_act = torch.zeros(E, h_low, model.action_dim, device=device)

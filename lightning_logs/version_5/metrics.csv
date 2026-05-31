@@ -1,0 +1,2 @@
+epoch,fit/loss,fit/pred_loss,fit/sigreg_loss,step
+0,2.1778407096862793,0.5088952779769897,18.546875,49

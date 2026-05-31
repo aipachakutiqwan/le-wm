@@ -11,6 +11,8 @@ New components (jepa.py and module.py are not modified):
 See hierarchical_plan.py for the two-level CEM-MPC planner.
 """
 
+import logging
+
 import lightning as pl
 import torch
 import torch.nn.functional as F
@@ -18,6 +20,8 @@ from torch import nn
 
 from jepa import JEPA
 from module import ARPredictor
+
+log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -292,26 +296,40 @@ class HierarchicalLeWM(nn.Module):
         -------
         dict with 'loss' (scalar), 'high_pred_emb', 'high_target_emb'
         """
-        pixels = obs["pixels"]                              # (B, T, C, H, W)
         actions = torch.nan_to_num(obs["action"], 0.0)     # (B, T, action_dim)
+        B, _, A = actions.shape
 
-        grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
-        with grad_ctx:
-            emb = self.jepa.encode({"pixels": pixels})["emb"]  # (B, T, embed_dim)
+        if "emb" in obs:
+            emb = obs["emb"]                                    # (B, T, embed_dim) — pre-cached
+        else:
+            grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
+            with grad_ctx:
+                emb = self.jepa.encode({"pixels": obs["pixels"]})["emb"]  # (B, T, embed_dim)
 
         W = len(waypoint_idx)
         wp_emb = emb[:, waypoint_idx]      # (B, W, embed_dim)
 
-        # A_ψ: encode each inter-waypoint action chunk → one macro-action
+        # A_ψ: encode all inter-waypoint action chunks in one batched forward pass.
+        # Chunks may differ in length by ±1 step (linspace rounding), so we pad to
+        # max_len and pass a mask; ActionEncoder ignores masked positions via
+        # src_key_padding_mask.
         n_seg = W - 1
-        macro_list = []
-        for k in range(n_seg):
-            s = int(waypoint_idx[k])
-            e = int(waypoint_idx[k + 1])
-            chunk = actions[:, s:e]                              # (B, chunk_len, A)
-            macro_list.append(self.action_encoder_high(chunk))  # (B, d_L)
+        seg_slices = [(int(waypoint_idx[k]), int(waypoint_idx[k + 1])) for k in range(n_seg)]
+        chunk_lens = [e - s for s, e in seg_slices]
+        max_len = max(chunk_lens)
 
-        macro_actions = torch.stack(macro_list, dim=1)   # (B, n_seg, d_L)
+        padded = actions.new_zeros(B, n_seg, max_len, A)       # (B, n_seg, max_len, A)
+        mask = torch.ones(B, n_seg, max_len, dtype=torch.bool, device=actions.device)  # True = pad
+
+        for k, ((s, e), clen) in enumerate(zip(seg_slices, chunk_lens)):
+            padded[:, k, :clen] = actions[:, s:e]
+            mask[:, k, :clen] = False
+
+        macro_flat = self.action_encoder_high(
+            padded.view(B * n_seg, max_len, A),
+            padding_mask=mask.view(B * n_seg, max_len),
+        )                                                        # (B*n_seg, d_L)
+        macro_actions = macro_flat.view(B, n_seg, -1)           # (B, n_seg, d_L)
 
         # P^(2): causal AR prediction — position k predicts waypoint k+1
         pred_emb = self.high_predictor(wp_emb[:, :-1], macro_actions)  # (B, n_seg, D)
@@ -431,7 +449,8 @@ def train_hierarchical_lewm(
                 k: v.to(device) if torch.is_tensor(v) else v
                 for k, v in batch.items()
             }
-            T = batch["pixels"].shape[1]
+            obs = batch["emb"] if "emb" in batch else batch["pixels"]
+            T = obs.shape[1]
             wp_idx = sample_waypoints(T, N=n_waypoints, device=device)
 
             out = model.forward_high(batch, wp_idx, freeze_encoder=freeze_encoder)
@@ -476,20 +495,28 @@ class HierarchicalLeWMModule(pl.LightningModule):
         n_waypoints: int,
         lr: float = 5e-4,
         freeze_encoder: bool = True,
+        compile_model: bool = True,
     ):
         super().__init__()
         self.model = model
         self.n_waypoints = n_waypoints
         self.lr = lr
         self.freeze_encoder = freeze_encoder
+        self.compile_model = compile_model
 
     def setup(self, stage: str) -> None:
-        if stage == "fit" and self.freeze_encoder:
+        if stage != "fit":
+            return
+        if self.freeze_encoder:
             for p in self.model.jepa.parameters():
                 p.requires_grad_(False)
+        if self.compile_model:
+            self.model.action_encoder_high = torch.compile(self.model.action_encoder_high)
+            self.model.high_predictor = torch.compile(self.model.high_predictor)
 
     def training_step(self, batch, batch_idx):
-        T = batch["pixels"].shape[1]
+        obs = batch["emb"] if "emb" in batch else batch["pixels"]
+        T = obs.shape[1]
         wp_idx = sample_waypoints(T, N=self.n_waypoints, device=self.device)
         out = self.model.forward_high(batch, wp_idx, freeze_encoder=self.freeze_encoder)
         self.log("train/loss", out["loss"], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -502,7 +529,14 @@ class HierarchicalLeWMModule(pl.LightningModule):
             list(self.model.action_encoder_high.parameters())
             + list(self.model.high_predictor.parameters())
         )
-        optimizer = torch.optim.AdamW(stage2_params, lr=self.lr)
+        # Linear scaling rule: effective batch = batch_size × world_size × accumulate_grad_batches.
+        accum = self.trainer.accumulate_grad_batches
+        effective_lr = self.lr * self.trainer.world_size * accum
+        log.info(
+            "world_size=%d  accum=%d  base_lr=%.2e  effective_lr=%.2e",
+            self.trainer.world_size, accum, self.lr, effective_lr,
+        )
+        optimizer = torch.optim.AdamW(stage2_params, lr=effective_lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=self.trainer.max_epochs
         )

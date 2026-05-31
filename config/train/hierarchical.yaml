@@ -25,6 +25,8 @@ trainer:
   devices: auto
   precision: bf16-mixed
   log_every_n_steps: 1
+  strategy: ddp_find_unused_parameters_false
+  accumulate_grad_batches: 1   # increase to simulate larger batch without more GPUs
 
 loader:
   batch_size: 64
@@ -37,7 +39,8 @@ loader:
 stage2:
   lr: 5e-4
   n_epochs: 10
-  freeze_encoder: True    # keep E and P^(1) frozen; only A_ψ and P^(2) are trained
+  freeze_encoder: True           # keep E and P^(1) frozen; only A_ψ and P^(2) are trained
+  compile: True                  # torch.compile ActionEncoder + HighLevelPredictor (PyTorch 2+)
 
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.
