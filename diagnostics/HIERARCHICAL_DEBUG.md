@@ -1,5 +1,81 @@
 # Hierarchical LeWM — planning failure investigation
 
+## ⚠️ CORRECTION (2026-05-28) — probe was off-distribution
+
+The original probe fed **raw** actions to `A_ψ` / `P¹`, but the training pipeline
+z-scores the action column before those modules see it. Re-measuring with the
+fix:
+
+- `[AR]` H=3 explained variance: **25% → 74%** (i.e. `P²` is *not* weak at the
+  planning horizon — that whole finding was a measurement artefact).
+- TF MSE held-out: 0.91 → **0.34** (matches W&B `val_loss=0.42`).
+- `P¹` 5-step rollout explained: 60% → **92%**.
+- `[GOAL]` closure stays at **~26%** — `plan()` samples its inner CEM in
+  already-normalised action space, so this number was always correct.
+
+**Revised dominant cause.** `P²` and `P¹` are accurate multi-step predictors.
+The real limit is **macro-action span**: even when CEM searches the entire
+macro-action space, the rolled-out endpoint reaches only ~26% of the way to far
+goals. That's a representational/expressiveness ceiling on the `A_ψ`→`P²`
+mapping (the 4-dim macro-action bottleneck), not a fidelity problem.
+
+**What this changes about the fixes.**
+- Widening `latent_action_dim` (4→8, cherry-pick) and the KL/moment-matching reg
+  on `A_ψ` directly address the real cause. These remain the right levers.
+- The rollout-loss training was motivated by the bogus "H=3 collapse" reading.
+  Its actual delivered benefit was generalisation (val 0.84→0.42) — which is
+  also questionable now since baseline 0.84 was measured on raw actions and the
+  true baseline is likely much closer to 0.34.
+- All "planner is worse than random / actions too small" findings remain valid:
+  they were measured end-to-end with the env, independent of the probe bug.
+
+## ✓ UPDATE (2026-05-29) — Run 2 probe confirms fixes worked
+
+Run 2 (`20260528_161439`, d_L=8, n_waypoints=4, KL reg, rollout loss) probed correctly
+with `--n-waypoints 4`:
+
+| metric | Run 1 (corrected) | Run 2 |
+|---|---|---|
+| [AR] H=1 | 87% | **93%** |
+| [AR] H=3 | 74% | **84%** (flat to H=5!) |
+| [TF] MSE | 0.34 | **0.18** |
+| [GOAL] closure | 26% | **41%** |
+| A_ψ \|mean\| avg | ~3.6 | **0.47** |
+| Planning (n=50) | 48% | **52%** |
+
+**AR fidelity is fully solved**: the AR curve is flat from H=2 to H=5 (84–86%) — no
+collapse at H=3. The combination of rollout loss + d_L=8 + n_waypoints=4 eliminated
+the exposure-bias failure mode entirely.
+
+**KL reg works**: A_ψ |mean| avg dropped from 3.6 → 0.47 — macros nearly centred on
+N(0,1), eliminating the CEM prior mismatch identified earlier.
+
+**Remaining bottleneck — action magnitude**: planner |action| = 0.21 vs real 1.15
+(~5× too small). [GOAL] closure improved 26%→41% but planned actions are still
+undersized. This is the dominant cap on planning performance above 52%.
+
+See `METRICS.md` for the bug details and the corrected numbers table.
+
+## ✓ UPDATE (2026-05-30) — action-magnitude bottleneck is largely a planner-config mismatch
+
+The "planner |action| 5× too small" symptom is not (only) a model defect — it's an
+inner-horizon mismatch. The eval default `h_low=10` gave the inner CEM ~10 steps to reach a
+subgoal only **~2–3 effective frames away** (the macro span for `num_steps=12, n_waypoints=4`,
+waypoints `[0,2,4,7,9,11]`). With `receding_horizon=1` executing only the first action, the
+elite-mean plan spread motion thinly → tiny first action.
+
+**Fix (config-only): `h_low=10 → 3` lifted Run 3 from 56% → 60%** (n=50, row 9). Then
+**`outer_std=5.0 → 2.0` lifted it 60% → 68%** (row 10) — the old wide prior sampled macros
+3–5× too wide now that KL reg makes A_ψ ≈ N(0,1). **The two stale eval defaults together
+cost ~12 pp; fixing both beats Arihant's 62% with no retrain.** The probe's `[LOW]` block
+was already rolling at the correct horizon (`seg_len`≈2–3), so it had been measuring a
+horizon eval never used — a probe↔eval mismatch, now reconciled.
+
+Remaining levers, all config-only and expected additive: `subgoal_amplify 1.5–2.0`,
+`H_high=2`, finer `outer_std` sweep (1.5 / 2.5).
+
+---
+
 ## CONCLUSION (2026-05-27)
 
 The 20% has **two fixed execution bugs plus one dominant model-quality cause**.

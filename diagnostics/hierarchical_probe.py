@@ -49,8 +49,14 @@ _MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1)
 _STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3, 1, 1)
 
 
-def load_windows(dataset, num_windows, num_steps, frameskip, wp_idx, device, seed=0):
+def load_windows(dataset, num_windows, num_steps, frameskip, wp_idx, device,
+                 seed=0, action_scaler=None):
     """Sample `num_windows` trajectory windows; return waypoint latents + actions.
+
+    If `action_scaler` is given (sklearn StandardScaler fit on the dataset's raw
+    action column), the returned actions are z-scored to match the distribution
+    A_ψ / P¹ were trained on. Pass None to get raw actions (off-distribution —
+    the historical bug).
 
     Returns
     -------
@@ -65,7 +71,15 @@ def load_windows(dataset, num_windows, num_steps, frameskip, wp_idx, device, see
         act.append(s["action"])           # (T, A)
     pix = torch.stack(pix).float() / 255.0
     pix = ((pix - _MEAN) / _STD).to(device)
-    return pix, torch.stack(act).to(device)
+    act = torch.stack(act)                # (M, T, A_eff)
+    if action_scaler is not None:
+        # A_eff = frameskip × base_dim; scaler was fit on base_dim raw actions.
+        M, T, A_eff = act.shape
+        base = action_scaler.n_features_in_
+        arr = act.cpu().numpy().reshape(M, T, A_eff // base, base)
+        arr = (arr - action_scaler.mean_) / action_scaler.scale_
+        act = torch.from_numpy(arr.reshape(M, T, A_eff)).float()
+    return pix, act.to(device)
 
 
 def encode(model, pix):
@@ -171,6 +185,22 @@ def probe_high_ar_fidelity(model, wp_emb, macro_real):
         err = (pred - tgt).pow(2).mean().item()
         copy = (z_init - tgt).pow(2).mean().item()
         print(f"  H={H}  MSE={err:.3f}  baseline(stay)={copy:.3f}  explained={100*(1-err/copy):5.1f}%")
+
+
+def probe_tf_holdout(model, wp_emb, macro_real):
+    """All-positions one-step teacher-forced MSE on held-out windows.
+
+    Mirrors what `train_hierarchical_lewm` logs as `stage2/val_loss`: predicts
+    waypoints 1..n_seg from the TRUE previous waypoints (single parallel causal
+    pass, no AR feedback) and averages MSE across all positions. Use this to
+    compare a checkpoint against `stage2/val_loss`, or to get the metric for
+    checkpoints trained without val tracking (see METRICS.md).
+    """
+    with torch.no_grad():
+        pred = model.high_predictor(wp_emb[:, :-1], macro_real)
+    tf_mse = (pred - wp_emb[:, 1:]).pow(2).mean().item()
+    print(f"\n[TF] one-step teacher-forced MSE (all positions, held-out): {tf_mse:.4f}")
+    print(f"     matches `stage2/val_loss` for trained models; comparable across runs")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -289,7 +319,7 @@ def main():
     ap.add_argument("--num-windows", type=int, default=32)
     ap.add_argument("--num-steps", type=int, default=20)
     ap.add_argument("--frameskip", type=int, default=5)
-    ap.add_argument("--n-waypoints", type=int, default=3)
+    ap.add_argument("--n-waypoints", type=int, default=4)
     ap.add_argument("--goal-offset", type=int, default=25,
                     help="goal distance (steps) for the decisive end-to-end probe; match eval")
     ap.add_argument("--seed", type=int, default=0)
@@ -311,8 +341,18 @@ def main():
     print(f"waypoint indices={wp_idx}  latent_action_dim={model.latent_action_dim}  "
           f"action_dim={model.action_dim}  history_size={model.history_size}")
 
+    # Fit the same action scaler the training/eval pipeline uses (z-scores actions
+    # before they reach A_ψ / P¹). Feeding raw actions to those modules yields
+    # off-distribution behaviour and inflated MSE — see METRICS.md.
+    flat_ds = swm.data.HDF5Dataset(args.dataset, keys_to_cache=["action", "proprio"])
+    acol = np.asarray(flat_ds.get_col_data("action"))
+    acol = acol[~np.isnan(acol).any(axis=1)]
+    action_scaler = preprocessing.StandardScaler().fit(acol)
+    print(f"action scaler  mean={action_scaler.mean_.round(3)}  scale={action_scaler.scale_.round(3)}")
+
     pix, act = load_windows(dataset, args.num_windows, args.num_steps, args.frameskip,
-                            wp_idx, args.device, seed=args.seed)
+                            wp_idx, args.device, seed=args.seed,
+                            action_scaler=action_scaler)
     wp_emb = encode(model, pix)
     macro_real = real_macro_actions(model, act, wp_idx)
 
@@ -320,6 +360,7 @@ def main():
     probe_control_authority(model, wp_emb, macro_real, H_high=args.n_waypoints)
     probe_outer_cem(model, wp_emb, macro_real, H_high=args.n_waypoints)
     probe_high_ar_fidelity(model, wp_emb, macro_real)
+    probe_tf_holdout(model, wp_emb, macro_real)
     probe_low_level(model, wp_emb, act, wp_idx)
     probe_goal_reachability(model, args.dataset, args.device,
                             goal_offset=args.goal_offset, seed=args.seed)
