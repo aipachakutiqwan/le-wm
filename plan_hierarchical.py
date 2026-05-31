@@ -399,7 +399,18 @@ def run(cfg: DictConfig):
     py_log.info("evaluation time:      %.1f s (%.1f min)", elapsed, elapsed / 60)
     py_log.info("total planning time:  %.1f s (%.1f%% of eval)", policy._total_plan_time, 100 * policy._total_plan_time / elapsed)
 
-    out = results_path / cfg.output.filename
+    sr = metrics.get("success_rate", metrics.get("success", float("nan")))
+    env_slug = cfg.dataset.name.replace("/", "_")
+    p = cfg.plan
+    out_name = (
+        f"{env_slug}"
+        f"_sr{sr:.2f}"
+        f"_H{p.H_high}_h{p.h_low}"
+        f"_S{p.outer_samples}_oi{p.outer_iters}_ii{p.inner_iters}"
+        f"_n{cfg.eval.num_eval}_bgt{cfg.eval.eval_budget}"
+        f".txt"
+    )
+    out = results_path / out_name
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("a") as f:
         f.write("\n==== CONFIG ====\n")

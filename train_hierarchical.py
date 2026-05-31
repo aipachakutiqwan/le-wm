@@ -18,10 +18,10 @@ python train_hierarchical.py stage1_checkpoint=<path/to/lewm_epoch_100_object.ck
 # Different dataset
 python train_hierarchical.py data=pusht stage1_checkpoint=<path>
 
-# Quick smoke-test (CPU)
+# Quick smoke-test (CPU / MPS — hardware is auto-detected)
 python train_hierarchical.py stage1_checkpoint=<path> \\
-    trainer.max_epochs=2 loader.batch_size=8 \\
-    trainer.accelerator=cpu trainer.devices=1 wandb.enabled=False stage2.compile=false
+    trainer.max_epochs=2 loader.batch_size=8 loader.num_workers=0 \\
+    wandb.enabled=False stage2.compile=false
 """
 
 import logging
@@ -326,6 +326,33 @@ def run(cfg):
     ##########################
     ##       training       ##
     ##########################
+
+    # Patch trainer config for the available hardware before passing to Lightning.
+    # ddp_find_unused_parameters_false and bf16-mixed both require multi-GPU CUDA;
+    # strip them automatically so the same config works on CPU and MPS too.
+    with open_dict(cfg):
+        cuda_ok = torch.cuda.is_available() and torch.cuda.device_count() > 0
+        accel = cfg.trainer.get("accelerator", "auto")
+        on_cpu_or_mps = (not cuda_ok) or (accel in ("cpu", "mps"))
+        single_device = cuda_ok and torch.cuda.device_count() == 1
+
+        if on_cpu_or_mps or single_device:
+            cfg.trainer.pop("strategy", None)
+
+        if on_cpu_or_mps:
+            cfg.trainer.accelerator = "cpu"
+            cfg.trainer.devices = 1
+            cfg.trainer.precision = "32-true"
+
+        # persistent_workers=True requires num_workers > 0.
+        if cfg.loader.get("num_workers", 0) == 0:
+            cfg.loader.persistent_workers = False
+
+    py_log.info(
+        "trainer: accelerator=%s  devices=%s  precision=%s  strategy=%s",
+        cfg.trainer.get("accelerator"), cfg.trainer.get("devices"),
+        cfg.trainer.get("precision"), cfg.trainer.get("strategy", "none"),
+    )
 
     trainer = pl.Trainer(
         **OmegaConf.to_container(cfg.trainer, resolve=True),

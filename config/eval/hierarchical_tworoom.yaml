@@ -53,5 +53,5 @@ eval:
         goal_state:
           value: goal_proprio
 
-output:
-  filename: hierarchical_results.txt
+# output filename is built automatically by plan_hierarchical.py:
+#   {env}_sr{success_rate}_H{H_high}_h{h_low}_S{outer_samples}_oi{outer_iters}_ii{inner_iters}_n{num_eval}_bgt{eval_budget}.txt
