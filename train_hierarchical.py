@@ -292,6 +292,7 @@ def run(cfg):
         n_waypoints=cfg.wm.n_waypoints,
         history_size=cfg.wm.history_size,
         lambda_sigreg=cfg.wm.get("lambda_sigreg", 0.0),
+        lambda_mac_reg=cfg.wm.get("lambda_mac_reg", 0.0),
         high_depth=cfg.wm.high_depth,
         high_heads=cfg.wm.high_heads,
         high_mlp_dim=cfg.wm.high_mlp_dim,

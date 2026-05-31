@@ -77,6 +77,7 @@ def plan(
     inner_samples: int = 256,
     outer_iters: int = 5,
     inner_iters: int = 5,
+    _diag: dict | None = None,
 ) -> torch.Tensor:
     """Two-level CEM-MPC. Returns the first primitive action to execute.
 
@@ -116,16 +117,14 @@ def plan(
     # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
     mu_mac = torch.zeros(H_high, d_L, device=device)
     std_mac = torch.ones(H_high, d_L, device=device)
+    w_high = torch.linspace(1.0 / H_high, 1.0, H_high, device=device)
+    w_high = w_high / w_high.sum()   # (H,) normalised progressive weights
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, H_high, d_L)
         subgoals = model._rollout_high(z_init, candidates)     # (S, H_high, D)
-        # Linear weights across subgoals: later waypoints penalised more,
-        # but all contribute — encourages progressive approach to the goal.
-        w = torch.linspace(1.0 / H_high, 1.0, H_high, device=device)
-        w = w / w.sum()
         dists = (subgoals - z_goal.unsqueeze(0).unsqueeze(1)).abs().sum(-1)  # (S, H)
-        return (dists * w.unsqueeze(0)).sum(-1)                # (S,)
+        return (dists * w_high.unsqueeze(0)).sum(-1)           # (S,)
 
     t_outer = time.perf_counter()
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
@@ -133,8 +132,10 @@ def plan(
 
     # Single rollout: reuse subgoals for both the debug cost and z_sg.
     best_subgoals = model._rollout_high(z_init, best_mac.unsqueeze(0))  # (1, H_high, D)
-    outer_cost_val = (best_subgoals[0, -1] - z_goal).abs().sum().item()
+    outer_cost_val = ((best_subgoals[0] - z_goal.unsqueeze(0)).abs().sum(-1) * w_high).sum().item()
     py_log.info("outer CEM — best_cost=%.4f  ms=%.1f", outer_cost_val, (time.perf_counter() - t_outer) * 1e3)
+    if _diag is not None:
+        _diag["outer_cost"] = outer_cost_val
 
     # ── Derive first subgoal ──────────────────────────────────────────────────
     z_sg = best_subgoals[0, 0]  # (D,)
@@ -152,9 +153,11 @@ def plan(
     best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters)
     # best_act: (h_low, action_dim)
 
-    if py_log.isEnabledFor(logging.DEBUG):
+    if _diag is not None or py_log.isEnabledFor(logging.DEBUG):
         inner_cost_val = inner_cost(best_act.unsqueeze(0)).item()
         py_log.debug("inner CEM — best_cost=%.4f", inner_cost_val)
+        if _diag is not None:
+            _diag["inner_cost"] = inner_cost_val
     total_s = time.perf_counter() - t0
     py_log.info("inner CEM — ms=%.1f  total=%.1fs (%.2f min)",
                 (time.perf_counter() - t_inner) * 1e3, total_s, total_s / 60)
@@ -222,6 +225,7 @@ def plan_batched(
     outer_iters: int = 5,
     inner_iters: int = 5,
     warmstart: dict | None = None,
+    _diag: dict | None = None,
 ) -> torch.Tensor:
     """Two-level CEM-MPC for E environments solved in parallel on one device.
 
@@ -259,6 +263,9 @@ def plan_batched(
         mu_mac = torch.zeros(E, H_high, d_L, device=device)
         std_mac = torch.ones(E, H_high, d_L, device=device)
 
+    w_high = torch.linspace(1.0 / H_high, 1.0, H_high, device=device)
+    w_high = w_high / w_high.sum()   # (H,) normalised progressive weights
+
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (E, S, H_high, d_L)
         S = candidates.shape[1]
@@ -266,10 +273,8 @@ def plan_batched(
         z_flat = z_init.unsqueeze(1).expand(E, S, D).reshape(E * S, D)
         subgoals = model._rollout_high(z_flat, mac_flat)              # (E*S, H_high, D)
         subgoals = subgoals.reshape(E, S, H_high, D)                 # (E, S, H, D)
-        w = torch.linspace(1.0 / H_high, 1.0, H_high, device=device)
-        w = w / w.sum()
         dists = (subgoals - z_goal.unsqueeze(1).unsqueeze(2)).abs().sum(-1)  # (E, S, H)
-        return (dists * w.unsqueeze(0).unsqueeze(0)).sum(-1)          # (E, S)
+        return (dists * w_high.unsqueeze(0).unsqueeze(0)).sum(-1)     # (E, S)
 
     t_outer = time.perf_counter()
     best_mac = cem_batched(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
@@ -280,9 +285,11 @@ def plan_batched(
 
     # Single rollout: reuse subgoals for both the debug cost and z_sg.
     best_subgoals = model._rollout_high(z_init, best_mac)             # (E, H_high, D)
-    outer_cost_val = (best_subgoals[:, -1] - z_goal).abs().sum(-1).mean().item()
+    outer_cost_val = ((best_subgoals - z_goal.unsqueeze(1)).abs().sum(-1) * w_high.unsqueeze(0)).sum(-1).mean().item()
     py_log.info("outer CEM — mean_best_cost=%.4f  E=%d  ms=%.1f",
                 outer_cost_val, E, (time.perf_counter() - t_outer) * 1e3)
+    if _diag is not None:
+        _diag["outer_cost"] = outer_cost_val
 
     # ── Derive first subgoal per environment ───────────────────────────────────
     z_sg = best_subgoals[:, 0]                                        # (E, D)
@@ -301,9 +308,11 @@ def plan_batched(
 
     t_inner = time.perf_counter()
     best_act = cem_batched(inner_cost, mu_act, std_act, inner_samples, inner_iters)
-    if py_log.isEnabledFor(logging.DEBUG):
-        py_log.debug("inner CEM — mean_best_cost=%.4f",
-                     inner_cost(best_act.unsqueeze(1)).mean().item())
+    if _diag is not None or py_log.isEnabledFor(logging.DEBUG):
+        inner_cost_val = inner_cost(best_act.unsqueeze(1)).mean().item()
+        py_log.debug("inner CEM — mean_best_cost=%.4f", inner_cost_val)
+        if _diag is not None:
+            _diag["inner_cost"] = inner_cost_val
     total_s = time.perf_counter() - t0
     py_log.info("inner CEM — ms=%.1f  total=%.1fs (%.2f min)",
                 (time.perf_counter() - t_inner) * 1e3, total_s, total_s / 60)

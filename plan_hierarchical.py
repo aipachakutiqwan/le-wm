@@ -29,13 +29,14 @@ os.environ["MUJOCO_GL"] = "egl"
 import hydra
 import numpy as np
 import torch
+import wandb
 import stable_worldmodel as swm
 import stable_pretraining as spt
 from omegaconf import DictConfig, OmegaConf
 from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 
-from hierarchical_plan import plan, plan_batched
+from hierarchical_plan import plan_batched
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -58,7 +59,8 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
     device     : torch device string
     """
 
-    def __init__(self, model, plan_cfg, process, transform, device, eval_budget: int = 0):
+    def __init__(self, model, plan_cfg, process, transform, device, eval_budget: int = 0,
+                 wandb_run=None):
         super().__init__()
         self.model = model.eval().to(device)
         self.plan_cfg = plan_cfg
@@ -66,12 +68,14 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self.transform = transform
         self.device = device
         self._eval_budget = eval_budget          # total env steps per episode (for X/Y display)
+        self._wandb_run = wandb_run
         self._action_queue: deque = deque()
         # effective_action_dim = frameskip * base_action_dim; derived at first get_action call
         self._frameskip: int | None = None
         self._total_plan_steps: int | None = None  # derived once frameskip is known
         self._env_step: int = 0
         self._plan_step: int = 0
+        self._global_plan_step: int = 0          # never reset — W&B x-axis across all episodes
         self._total_plan_time: float = 0.0         # cumulative seconds spent in plan()
         # Outer-CEM warm-start: keyed by "mu_mac" (E, H_high, d_L) on CPU.
         # Updated in-place by plan_batched after each call; cleared on episode reset.
@@ -109,7 +113,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self._warmstart.clear()
         self._env_step = 0
         self._plan_step = 0
-        self._total_plan_time = 0.0
+        # _global_plan_step and _total_plan_time are intentionally NOT reset here
 
     def _encode(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode pixel tensor to latent states.
@@ -132,6 +136,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         z_init: torch.Tensor,
         z_goal: torch.Tensor,
         plan_kwargs: dict,
+        _diag: dict | None = None,
     ) -> np.ndarray:
         """Shard environments across GPUs and run plan_batched on each shard in parallel."""
         n_gpus = len(self._gpu_replicas)
@@ -149,10 +154,11 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
 
         def _run_shard(dev, replica, zi, zg, mu_i):
             ws: dict = {} if mu_i is None else {"mu_mac": mu_i.to(dev)}
-            action = plan_batched(replica, zi.to(dev), zg.to(dev), warmstart=ws, **plan_kwargs)
-            # ws["mu_mac"] is now the updated best_mac for this shard (on dev).
+            shard_diag: dict | None = {} if _diag is not None else None
+            action = plan_batched(replica, zi.to(dev), zg.to(dev), warmstart=ws,
+                                  _diag=shard_diag, **plan_kwargs)
             updated_mu = ws["mu_mac"].cpu() if "mu_mac" in ws else None
-            return action.cpu().numpy(), updated_mu
+            return action.cpu().numpy(), updated_mu, shard_diag
 
         # skip empty shards (can occur when E < n_gpus)
         active = [
@@ -171,6 +177,13 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         new_mus = [r[1] for r in results if r[1] is not None]
         if new_mus:
             self._warmstart["mu_mac"] = torch.cat(new_mus, dim=0)
+
+        # Aggregate per-shard diags (mean across shards).
+        if _diag is not None:
+            shard_diags = [r[2] for r in results if r[2]]
+            if shard_diags:
+                for key in shard_diags[0]:
+                    _diag[key] = sum(d[key] for d in shard_diags) / len(shard_diags)
 
         return np.concatenate([r[0] for r in results], axis=0)
 
@@ -215,17 +228,25 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             outer_iters=self.plan_cfg.outer_iters,
             inner_iters=self.plan_cfg.inner_iters,
         )
+        _diag: dict | None = {} if self._wandb_run else None
         _t0 = time.perf_counter()
         if len(self._gpu_replicas) > 1:
-            eff = self._plan_multi_gpu(z_init, z_goal, plan_kwargs)
+            eff = self._plan_multi_gpu(z_init, z_goal, plan_kwargs, _diag=_diag)
         else:
             eff = plan_batched(
-                self.model, z_init, z_goal, warmstart=self._warmstart, **plan_kwargs
+                self.model, z_init, z_goal, warmstart=self._warmstart, _diag=_diag, **plan_kwargs
             ).cpu().numpy()
         _plan_elapsed = time.perf_counter() - _t0
         self._total_plan_time += _plan_elapsed
+        self._global_plan_step += 1
         py_log.info("  plan done in %.1f s / %.2f min  (total: %.1f s / %.1f min)",
                     _plan_elapsed, _plan_elapsed / 60, self._total_plan_time, self._total_plan_time / 60)
+        if self._wandb_run and _diag:
+            self._wandb_run.log({
+                "plan/outer_cost": _diag.get("outer_cost"),
+                "plan/inner_cost": _diag.get("inner_cost"),
+                "plan/plan_time_s": _plan_elapsed,
+            }, step=self._global_plan_step)
 
         if "action" in self.process:
             scaler = self.process["action"]
@@ -266,7 +287,7 @@ def img_transform(img_size: int):
         transforms.ToImage(),
         transforms.ToDtype(torch.float32, scale=True),
         transforms.Normalize(**spt.data.dataset_stats.ImageNet),
-        transforms.Resize(size=img_size),
+        transforms.Resize(size=img_size, antialias=True),
     ])
 
 
@@ -344,6 +365,28 @@ def run(cfg: DictConfig):
     model.action_encoder_high = getattr(model.action_encoder_high, '_orig_mod', model.action_encoder_high)
     model.high_predictor = getattr(model.high_predictor, '_orig_mod', model.high_predictor)
 
+    ##########################
+    ##       W&B            ##
+    ##########################
+
+    wandb_run = None
+    if cfg.wandb.get("enabled", False):
+        p = cfg.plan
+        run_name = (
+            f"{cfg.dataset.name.replace('/', '_')}"
+            f"_H{p.H_high}_h{p.h_low}"
+            f"_oS{p.outer_samples}_oi{p.outer_iters}"
+            f"_iS{p.inner_samples}_ii{p.inner_iters}"
+            f"_n{cfg.eval.num_eval}_bgt{cfg.eval.eval_budget}"
+        )
+        wandb_run = wandb.init(
+            entity=cfg.wandb.get("entity"),
+            project=cfg.wandb.get("project", "lewm-eval"),
+            name=run_name,
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
+        py_log.info("W&B run: %s", wandb_run.url)
+
     policy = HierarchicalPolicy(
         model=model,
         plan_cfg=cfg.plan,
@@ -351,6 +394,7 @@ def run(cfg: DictConfig):
         transform=transform,
         device=cfg.device,
         eval_budget=cfg.eval.eval_budget,
+        wandb_run=wandb_run,
     )
 
     ##########################
@@ -423,6 +467,22 @@ def run(cfg: DictConfig):
         f.write(f"evaluation_time: {elapsed:.1f} s\n")
 
     py_log.info("Results written to %s", out)
+
+    if wandb_run is not None:
+        wandb_run.summary["success_rate"] = sr
+        wandb_run.log({
+            "eval/success_rate": sr,
+            "eval/num_eval": cfg.eval.num_eval,
+            "eval/eval_budget": cfg.eval.eval_budget,
+            "eval/eval_time_s": elapsed,
+            "eval/plan_time_s": policy._total_plan_time,
+            "eval/plan_time_frac": policy._total_plan_time / elapsed,
+            **{f"eval/{k}": v for k, v in metrics.items() if k != "success_rate"},
+        })
+        wandb_run.name = out_name[:-4]   # update run name to include success_rate
+        wandb_run.finish()
+        py_log.info("W&B run finished: %s", wandb_run.url)
+
     total_s = time.perf_counter() - t_run
     py_log.info("run complete — total time: %.1f s (%.1f min)", total_s, total_s / 60)
 

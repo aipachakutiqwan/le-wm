@@ -66,5 +66,10 @@ eval:
         target_quat:
           value: goal_privileged_block_0_quat
 
+wandb:
+  enabled: False   # override with wandb.enabled=True on the command line
+  entity: lewm
+  project: lewm-eval
+
 # output filename is built automatically by plan_hierarchical.py:
 #   {env}_sr{success_rate}_H{H_high}_h{h_low}_S{outer_samples}_oi{outer_iters}_ii{inner_iters}_n{num_eval}_bgt{eval_budget}.txt

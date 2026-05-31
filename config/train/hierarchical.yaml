@@ -54,6 +54,7 @@ wm:
   n_waypoints: 4          # N interior waypoints (6 total, matches PLDM Appendix B.4)
   latent_action_dim: 8    # d_L — matches PLDM Appendix B.4
   lambda_sigreg: 0.02     # SIGReg weight on P^(2) predicted waypoints (0 = disabled)
+  lambda_mac_reg: 0.01   # keeps A_ψ outputs near N(0,I) to match CEM prior
   high_depth: 6
   high_heads: 16
   high_mlp_dim: 2048

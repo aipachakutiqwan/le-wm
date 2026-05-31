@@ -230,6 +230,7 @@ class HierarchicalLeWM(nn.Module):
         n_waypoints: int = 3,
         history_size: int = 3,
         lambda_sigreg: float = 0.0,
+        lambda_mac_reg: float = 0.0,
         # high-level predictor knobs (mirror low-level defaults from train.py)
         high_depth: int = 6,
         high_heads: int = 16,
@@ -250,6 +251,7 @@ class HierarchicalLeWM(nn.Module):
         self.action_dim = action_dim
         self.history_size = history_size
         self.lambda_sigreg = lambda_sigreg
+        self.lambda_mac_reg = lambda_mac_reg
         if lambda_sigreg > 0.0:
             self.sigreg = SIGReg()
 
@@ -360,8 +362,10 @@ class HierarchicalLeWM(nn.Module):
                 )[:, -1:]                                             # (B, 1, D)
                 preds.append(pred_k)
                 if k < n_seg - 1:
-                    use_pred = torch.rand(1, device=wp_emb.device).item() < ss_prob
-                    next_z = pred_k.detach() if use_pred else wp_emb[:, k + 1 : k + 2]
+                    # Per-element Bernoulli: each sample independently decides whether
+                    # to feed back the model's own prediction or the ground-truth waypoint.
+                    use_pred = (torch.rand(B, 1, 1, device=wp_emb.device) < ss_prob)
+                    next_z = torch.where(use_pred, pred_k.detach(), wp_emb[:, k + 1 : k + 2])
                     z_seq = torch.cat([z_seq, next_z], dim=1)
             pred_emb = torch.cat(preds, dim=1)                       # (B, n_seg, D)
 
@@ -371,15 +375,25 @@ class HierarchicalLeWM(nn.Module):
 
         if self.lambda_sigreg > 0.0:
             loss_reg = self.sigreg(pred_emb.permute(1, 0, 2))       # SIGReg expects (T, B, D)
-            loss = loss_tf + self.lambda_sigreg * loss_reg
         else:
-            loss = loss_tf
             loss_reg = pred_emb.new_zeros(1).squeeze()
+
+        # Keep A_ψ outputs near N(0, I) so CEM prior (also N(0,1)) is well-matched.
+        if self.lambda_mac_reg > 0.0:
+            mac_reg = (macro_actions.pow(2).mean()
+                       + (macro_actions.std(dim=(0, 1)) - 1).pow(2).mean())
+        else:
+            mac_reg = macro_actions.new_zeros(1).squeeze()
+
+        loss = (loss_tf
+                + self.lambda_sigreg * loss_reg
+                + self.lambda_mac_reg * mac_reg)
 
         return {
             "loss": loss,
             "loss_tf": loss_tf,
             "loss_reg": loss_reg,
+            "loss_mac_reg": mac_reg,
             "high_pred_emb": pred_emb,
             "high_target_emb": target_emb,
         }
@@ -493,6 +507,7 @@ class HierarchicalLeWMModule(pl.LightningModule):
         self.log("train/loss", out["loss"], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/loss_tf", out["loss_tf"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("train/loss_reg", out["loss_reg"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train/loss_mac_reg", out["loss_mac_reg"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("train/ss_prob", ss_prob, on_step=False, on_epoch=True, sync_dist=False)
         log.debug("step %d — forward_ms=%.1f  loss=%.5f",
                   batch_idx, (time.perf_counter() - t0) * 1e3, out["loss"].item())
@@ -507,6 +522,7 @@ class HierarchicalLeWMModule(pl.LightningModule):
         self.log("val/loss", out["loss"], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("val/loss_tf", out["loss_tf"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("val/loss_reg", out["loss_reg"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("val/loss_mac_reg", out["loss_mac_reg"], on_step=False, on_epoch=True, sync_dist=True)
         return out["loss"]
 
     def configure_optimizers(self):
