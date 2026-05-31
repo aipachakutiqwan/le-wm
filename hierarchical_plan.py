@@ -115,13 +115,17 @@ def plan(
 
     # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
     mu_mac = torch.zeros(H_high, d_L, device=device)
-    std_mac = torch.full((H_high, d_L), 5.0, device=device)
+    std_mac = torch.ones(H_high, d_L, device=device)
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, H_high, d_L)
         subgoals = model._rollout_high(z_init, candidates)     # (S, H_high, D)
-        z_last = subgoals[:, -1]                               # (S, D)
-        return (z_last - z_goal.unsqueeze(0)).abs().sum(-1)    # (S,)
+        # Linear weights across subgoals: later waypoints penalised more,
+        # but all contribute — encourages progressive approach to the goal.
+        w = torch.linspace(1.0 / H_high, 1.0, H_high, device=device)
+        w = w / w.sum()
+        dists = (subgoals - z_goal.unsqueeze(0).unsqueeze(1)).abs().sum(-1)  # (S, H)
+        return (dists * w.unsqueeze(0)).sum(-1)                # (S,)
 
     t_outer = time.perf_counter()
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
@@ -137,7 +141,7 @@ def plan(
 
     # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
-    std_act = torch.full((h_low, model.action_dim), 1.0, device=device)
+    std_act = torch.full((h_low, model.action_dim), 0.5, device=device)
 
     def inner_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, h_low, action_dim)
@@ -250,10 +254,10 @@ def plan_batched(
     # mean.  The std is halved because the solution should be nearby.
     if warmstart is not None and "mu_mac" in warmstart:
         mu_mac = warmstart["mu_mac"].to(device)
-        std_mac = torch.full((E, H_high, d_L), 2.5, device=device)
+        std_mac = torch.full((E, H_high, d_L), 0.5, device=device)
     else:
         mu_mac = torch.zeros(E, H_high, d_L, device=device)
-        std_mac = torch.full((E, H_high, d_L), 5.0, device=device)
+        std_mac = torch.ones(E, H_high, d_L, device=device)
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (E, S, H_high, d_L)
@@ -261,8 +265,11 @@ def plan_batched(
         mac_flat = candidates.reshape(E * S, H_high, d_L)
         z_flat = z_init.unsqueeze(1).expand(E, S, D).reshape(E * S, D)
         subgoals = model._rollout_high(z_flat, mac_flat)              # (E*S, H_high, D)
-        z_last = subgoals[:, -1].reshape(E, S, D)                    # (E, S, D)
-        return (z_last - z_goal.unsqueeze(1)).abs().sum(-1)           # (E, S)
+        subgoals = subgoals.reshape(E, S, H_high, D)                 # (E, S, H, D)
+        w = torch.linspace(1.0 / H_high, 1.0, H_high, device=device)
+        w = w / w.sum()
+        dists = (subgoals - z_goal.unsqueeze(1).unsqueeze(2)).abs().sum(-1)  # (E, S, H)
+        return (dists * w.unsqueeze(0).unsqueeze(0)).sum(-1)          # (E, S)
 
     t_outer = time.perf_counter()
     best_mac = cem_batched(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
@@ -282,7 +289,7 @@ def plan_batched(
 
     # ── Inner CEM ──────────────────────────────────────────────────────────────
     mu_act = torch.zeros(E, h_low, model.action_dim, device=device)
-    std_act = torch.full((E, h_low, model.action_dim), 1.0, device=device)
+    std_act = torch.full((E, h_low, model.action_dim), 0.5, device=device)
 
     def inner_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (E, S, h_low, action_dim)
