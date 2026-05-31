@@ -378,7 +378,7 @@ class HierarchicalLeWM(nn.Module):
             # sampling prior. Stronger than the one-sided variance hinge above
             # (also constrains the mean; can be used in place of lambda_var).
             loss_kl = (
-                macro_actions.pow(2).mean()
+                macro_actions.mean(dim=(0,1)).pow(2).mean()
                 + (macro_actions.std(dim=(0, 1)) - 1).pow(2).mean()
             )
         else:
