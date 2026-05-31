@@ -12,6 +12,7 @@ See hierarchical_plan.py for the two-level CEM-MPC planner.
 """
 
 import logging
+import time
 
 import lightning as pl
 import torch
@@ -523,6 +524,7 @@ class HierarchicalLeWMModule(pl.LightningModule):
             self.model.high_predictor = torch.compile(self.model.high_predictor)
 
     def training_step(self, batch, batch_idx):
+        t0 = time.perf_counter()
         obs = batch["emb"] if "emb" in batch else batch["pixels"]
         T = obs.shape[1]
         wp_idx = sample_waypoints(T, N=self.n_waypoints, device=self.device)
@@ -530,6 +532,20 @@ class HierarchicalLeWMModule(pl.LightningModule):
         self.log("train/loss", out["loss"], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/tf_loss", out["tf_loss"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("train/kl_term", out["kl_term"], on_step=False, on_epoch=True, sync_dist=True)
+        log.debug("step %d — forward_ms=%.1f  loss=%.5f",
+                  batch_idx, (time.perf_counter() - t0) * 1e3, out["loss"].item())
+        return out["loss"]
+
+    def validation_step(self, batch, batch_idx):
+        obs = batch["emb"] if "emb" in batch else batch["pixels"]
+        T = obs.shape[1]
+        wp_idx = sample_waypoints(T, N=self.n_waypoints, device=self.device)
+        # Lightning wraps validation_step in torch.inference_mode(); freeze_encoder=True
+        # so encoder gradients are skipped regardless — no extra no_grad needed.
+        out = self.model.forward_high(batch, wp_idx, freeze_encoder=True)
+        self.log("val/loss", out["loss"], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val/tf_loss", out["tf_loss"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("val/kl_term", out["kl_term"], on_step=False, on_epoch=True, sync_dist=True)
         return out["loss"]
 
     def configure_optimizers(self):

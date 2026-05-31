@@ -43,6 +43,7 @@ def _make_transform(img_size: int) -> T.Compose:
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
 def run(cfg: DictConfig) -> None:
+    t_script = time.perf_counter()
     # allow extra keys not present in the base config
     with open_dict(cfg):
         device = cfg.setdefault("device", "cuda" if torch.cuda.is_available() else "cpu")
@@ -97,7 +98,12 @@ def run(cfg: DictConfig) -> None:
                 py_log.info("  %.1f%%  (%d/%d frames)  %.1fs", pct, end, n_total, time.perf_counter() - t0)
 
     np.save(out_path, all_emb)
-    py_log.info("Saved %s  (%.1f s total)", out_path, time.perf_counter() - t0)
+    encoding_s = time.perf_counter() - t0
+    total_s = time.perf_counter() - t_script
+    py_log.info(
+        "Saved %s — encoding: %.1f s  total (incl. model load): %.1f s (%.1f min)",
+        out_path, encoding_s, total_s, total_s / 60,
+    )
 
 
 if __name__ == "__main__":

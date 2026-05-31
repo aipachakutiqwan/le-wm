@@ -145,7 +145,21 @@ class EpochTimer(Callback):
         epoch = trainer.current_epoch + 1
         total = trainer.max_epochs
         elapsed = time.perf_counter() - self._t_epoch
-        py_log.info("epoch %d/%d — %.1f s", epoch, total, elapsed)
+        steps_per_sec = trainer.num_training_batches / elapsed
+        eta_s = (total - epoch) * elapsed
+        py_log.info(
+            "epoch %d/%d — %.1f s  (%.2f steps/s  ETA %.1f min)",
+            epoch, total, elapsed, steps_per_sec, eta_s / 60,
+        )
+
+    def on_validation_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        self._t_val = time.perf_counter()
+
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        if trainer.sanity_checking or not trainer.is_global_zero:
+            return
+        elapsed = time.perf_counter() - self._t_val
+        py_log.info("val epoch %d — %.1f s", trainer.current_epoch + 1, elapsed)
 
     def on_train_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         if not trainer.is_global_zero:
@@ -193,6 +207,7 @@ class EpochCheckpoint(Callback):
 @hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
 def run(cfg):
     torch.set_float32_matmul_precision("high")
+    t_run = time.perf_counter()
     py_log.info(
         "Hierarchical stage-2 training — data=%s checkpoint=%s",
         cfg.data.dataset.name,
@@ -252,11 +267,15 @@ def run(cfg):
     dataset.transform = transform
 
     rnd_gen = torch.Generator().manual_seed(cfg.seed)
-    train_set, _ = spt.data.random_split(
+    train_set, val_set = spt.data.random_split(
         dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
     )
+    py_log.info("train=%d  val=%d samples", len(train_set), len(val_set))
     dataloader = torch.utils.data.DataLoader(
         train_set, **cfg.loader, shuffle=True, drop_last=True, generator=rnd_gen
+    )
+    val_dataloader = torch.utils.data.DataLoader(
+        val_set, **cfg.loader, shuffle=False, drop_last=False
     )
 
     ##############################
@@ -316,7 +335,7 @@ def run(cfg):
     )
 
     py_log.info("Run directory: %s", run_dir)
-    trainer.fit(module, dataloader)
+    trainer.fit(module, dataloader, val_dataloaders=val_dataloader)
 
     ##########################
     ##        save          ##
@@ -326,6 +345,8 @@ def run(cfg):
         out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
         _save_model(module.model, out_path)
         py_log.info("Saved hierarchical model to %s", out_path)
+        total_s = time.perf_counter() - t_run
+        py_log.info("run complete — total time: %.1f s (%.1f min)", total_s, total_s / 60)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ parameters lives here.
 """
 
 import logging
+import time
 
 import torch
 
@@ -110,6 +111,7 @@ def plan(
     """
     device = z_init.device
     d_L = model.latent_action_dim
+    t0 = time.perf_counter()
 
     # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
     mu_mac = torch.zeros(H_high, d_L, device=device)
@@ -121,13 +123,14 @@ def plan(
         z_last = subgoals[:, -1]                               # (S, D)
         return (z_last - z_goal.unsqueeze(0)).abs().sum(-1)    # (S,)
 
+    t_outer = time.perf_counter()
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
     # best_mac: (H_high, d_L)
 
     # Single rollout: reuse subgoals for both the debug cost and z_sg.
     best_subgoals = model._rollout_high(z_init, best_mac.unsqueeze(0))  # (1, H_high, D)
-    py_log.debug("  outer CEM done — best cost: %.4f",
-                 (best_subgoals[0, -1] - z_goal).abs().sum().item())
+    outer_cost_val = (best_subgoals[0, -1] - z_goal).abs().sum().item()
+    py_log.info("outer CEM — best_cost=%.4f  ms=%.1f", outer_cost_val, (time.perf_counter() - t_outer) * 1e3)
 
     # ── Derive first subgoal ──────────────────────────────────────────────────
     z_sg = best_subgoals[0, 0]  # (D,)
@@ -141,12 +144,15 @@ def plan(
         z_final = model._rollout_low(z_init, candidates)       # (S, D)
         return (z_final - z_sg.unsqueeze(0)).abs().sum(-1)     # (S,)
 
+    t_inner = time.perf_counter()
     best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters)
     # best_act: (h_low, action_dim)
 
     if py_log.isEnabledFor(logging.DEBUG):
-        py_log.debug("  inner CEM done — best cost: %.4f",
-                     inner_cost(best_act.unsqueeze(0)).item())
+        inner_cost_val = inner_cost(best_act.unsqueeze(0)).item()
+        py_log.debug("inner CEM — best_cost=%.4f", inner_cost_val)
+    py_log.info("inner CEM — ms=%.1f  total_ms=%.1f",
+                (time.perf_counter() - t_inner) * 1e3, (time.perf_counter() - t0) * 1e3)
 
     return best_act[0]   # first primitive action: (action_dim,)
 
@@ -230,6 +236,7 @@ def plan_batched(
     E, D = z_init.shape
     device = z_init.device
     d_L = model.latent_action_dim
+    t0 = time.perf_counter()
 
     # ── Outer CEM ──────────────────────────────────────────────────────────────
     mu_mac = torch.zeros(E, H_high, d_L, device=device)
@@ -244,13 +251,14 @@ def plan_batched(
         z_last = subgoals[:, -1].reshape(E, S, D)                    # (E, S, D)
         return (z_last - z_goal.unsqueeze(1)).abs().sum(-1)           # (E, S)
 
+    t_outer = time.perf_counter()
     best_mac = cem_batched(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
 
     # Single rollout: reuse subgoals for both the debug cost and z_sg.
     best_subgoals = model._rollout_high(z_init, best_mac)             # (E, H_high, D)
-    if py_log.isEnabledFor(logging.DEBUG):
-        py_log.debug("  [batched] outer CEM done — mean best cost: %.4f",
-                     (best_subgoals[:, -1] - z_goal).abs().sum(-1).mean().item())
+    outer_cost_val = (best_subgoals[:, -1] - z_goal).abs().sum(-1).mean().item()
+    py_log.info("outer CEM — mean_best_cost=%.4f  E=%d  ms=%.1f",
+                outer_cost_val, E, (time.perf_counter() - t_outer) * 1e3)
 
     # ── Derive first subgoal per environment ───────────────────────────────────
     z_sg = best_subgoals[:, 0]                                        # (E, D)
@@ -267,9 +275,12 @@ def plan_batched(
         z_final = model._rollout_low(z_flat, act_flat).reshape(E, S, D)  # (E, S, D)
         return (z_final - z_sg.unsqueeze(1)).abs().sum(-1)               # (E, S)
 
+    t_inner = time.perf_counter()
     best_act = cem_batched(inner_cost, mu_act, std_act, inner_samples, inner_iters)
     if py_log.isEnabledFor(logging.DEBUG):
-        py_log.debug("  [batched] inner CEM done — mean best cost: %.4f",
+        py_log.debug("inner CEM — mean_best_cost=%.4f",
                      inner_cost(best_act.unsqueeze(1)).mean().item())
+    py_log.info("inner CEM — ms=%.1f  total_ms=%.1f",
+                (time.perf_counter() - t_inner) * 1e3, (time.perf_counter() - t0) * 1e3)
 
     return best_act[:, 0]   # (E, action_dim)

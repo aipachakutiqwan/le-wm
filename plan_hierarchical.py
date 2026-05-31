@@ -254,6 +254,7 @@ def get_episodes_length(dataset, episodes):
 
 @hydra.main(version_base=None, config_path="./config/eval", config_name="hierarchical_tworoom")
 def run(cfg: DictConfig):
+    t_run = time.perf_counter()
     py_log.info("Hierarchical eval — checkpoint=%s device=%s", cfg.checkpoint, cfg.device)
 
     assert cfg.plan_config.horizon * cfg.plan_config.action_block <= cfg.eval.eval_budget, (
@@ -370,6 +371,8 @@ def run(cfg: DictConfig):
         f.write(f"evaluation_time: {elapsed:.1f} s\n")
 
     py_log.info("Results written to %s", out)
+    total_s = time.perf_counter() - t_run
+    py_log.info("run complete — total time: %.1f s (%.1f min)", total_s, total_s / 60)
 
 
 if __name__ == "__main__":
