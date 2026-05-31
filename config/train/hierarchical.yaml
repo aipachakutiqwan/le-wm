@@ -67,6 +67,6 @@ wandb:
   config:
     entity: lewm
     project: lewm
-    name: ${output_model_name}
+    name: ${data.dataset.name}_ep${stage2.n_epochs}_wp${wm.n_waypoints}_dL${wm.latent_action_dim}_bs${loader.batch_size}_lr${stage2.lr}
     id: ${subdir}
     resume: allow

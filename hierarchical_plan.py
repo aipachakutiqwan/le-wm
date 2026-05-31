@@ -216,6 +216,7 @@ def plan_batched(
     inner_samples: int = 256,
     outer_iters: int = 5,
     inner_iters: int = 5,
+    warmstart: dict | None = None,
 ) -> torch.Tensor:
     """Two-level CEM-MPC for E environments solved in parallel on one device.
 
@@ -224,9 +225,14 @@ def plan_batched(
 
     Parameters
     ----------
-    model  : trained HierarchicalLeWM
-    z_init : (E, D) current latent states
-    z_goal : (E, D) goal latent states
+    model     : trained HierarchicalLeWM
+    z_init    : (E, D) current latent states
+    z_goal    : (E, D) goal latent states
+    warmstart : mutable dict optionally carrying ``"mu_mac": (E, H_high, d_L)``
+                from the previous call.  When present the outer CEM is
+                initialised from that tensor (std halved).  Updated in-place
+                with the new best_mac after each call so callers only need to
+                pass the same dict every time.
     (remaining args identical to plan())
 
     Returns
@@ -239,8 +245,14 @@ def plan_batched(
     t0 = time.perf_counter()
 
     # ── Outer CEM ──────────────────────────────────────────────────────────────
-    mu_mac = torch.zeros(E, H_high, d_L, device=device)
-    std_mac = torch.full((E, H_high, d_L), 5.0, device=device)
+    # Warm-start: reuse the previous best macro-action sequence as the initial
+    # mean.  The std is halved because the solution should be nearby.
+    if warmstart is not None and "mu_mac" in warmstart:
+        mu_mac = warmstart["mu_mac"].to(device)
+        std_mac = torch.full((E, H_high, d_L), 2.5, device=device)
+    else:
+        mu_mac = torch.zeros(E, H_high, d_L, device=device)
+        std_mac = torch.full((E, H_high, d_L), 5.0, device=device)
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (E, S, H_high, d_L)
@@ -253,6 +265,10 @@ def plan_batched(
 
     t_outer = time.perf_counter()
     best_mac = cem_batched(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
+
+    # Persist best_mac for the next call's warm-start (CPU to avoid GPU memory leak).
+    if warmstart is not None:
+        warmstart["mu_mac"] = best_mac.cpu()
 
     # Single rollout: reuse subgoals for both the debug cost and z_sg.
     best_subgoals = model._rollout_high(z_init, best_mac)             # (E, H_high, D)

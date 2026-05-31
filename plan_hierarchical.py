@@ -73,6 +73,9 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self._env_step: int = 0
         self._plan_step: int = 0
         self._total_plan_time: float = 0.0         # cumulative seconds spent in plan()
+        # Outer-CEM warm-start: keyed by "mu_mac" (E, H_high, d_L) on CPU.
+        # Updated in-place by plan_batched after each call; cleared on episode reset.
+        self._warmstart: dict = {}
 
         # Build per-GPU model replicas for multi-GPU planning.
         # Each entry is (device_str, model_replica); single GPU / CPU → one entry.
@@ -86,9 +89,24 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         else:
             self._gpu_replicas = [(device, self.model)]
 
+        # Compile rollout loops per replica, after deepcopy.
+        # mode="default" (Inductor): unrolls the small fixed loops and fuses ops.
+        # mode="reduce-overhead" (CUDA graphs) is intentionally NOT used: the
+        # rolling torch.cat inside _rollout_high/_rollout_low grows z_seq each
+        # step, producing dynamic intermediate shapes that CUDA graphs can't capture.
+        n_compiled = 0
+        for dev, replica in self._gpu_replicas:
+            if dev.startswith("cuda"):
+                replica._rollout_high = torch.compile(replica._rollout_high, mode="default")
+                replica._rollout_low  = torch.compile(replica._rollout_low,  mode="default")
+                n_compiled += 1
+        if n_compiled:
+            py_log.info("Compiled _rollout_high and _rollout_low on %d GPU replica(s)", n_compiled)
+
     def set_env(self, env) -> None:
         self.env = env
         self._action_queue.clear()
+        self._warmstart.clear()
         self._env_step = 0
         self._plan_step = 0
         self._total_plan_time = 0.0
@@ -121,23 +139,40 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         z_init_shards = torch.tensor_split(z_init, n_gpus, dim=0)
         z_goal_shards = torch.tensor_split(z_goal, n_gpus, dim=0)
 
-        def _run_shard(dev, replica, zi, zg):
-            return plan_batched(replica, zi.to(dev), zg.to(dev), **plan_kwargs).cpu().numpy()
+        # Shard the outer-CEM warm-start along the env axis (same split as z_init).
+        mu_mac_full = self._warmstart.get("mu_mac")
+        mu_mac_shards = (
+            torch.tensor_split(mu_mac_full, n_gpus, dim=0)
+            if mu_mac_full is not None
+            else [None] * n_gpus
+        )
+
+        def _run_shard(dev, replica, zi, zg, mu_i):
+            ws: dict = {} if mu_i is None else {"mu_mac": mu_i.to(dev)}
+            action = plan_batched(replica, zi.to(dev), zg.to(dev), warmstart=ws, **plan_kwargs)
+            # ws["mu_mac"] is now the updated best_mac for this shard (on dev).
+            updated_mu = ws["mu_mac"].cpu() if "mu_mac" in ws else None
+            return action.cpu().numpy(), updated_mu
 
         # skip empty shards (can occur when E < n_gpus)
         active = [
-            (dr, zi, zg)
-            for dr, zi, zg in zip(self._gpu_replicas, z_init_shards, z_goal_shards)
+            (dr, zi, zg, mu)
+            for dr, zi, zg, mu in zip(self._gpu_replicas, z_init_shards, z_goal_shards, mu_mac_shards)
             if zi.shape[0] > 0
         ]
         with ThreadPoolExecutor(max_workers=len(active)) as pool:
             futures = [
-                pool.submit(_run_shard, dev, replica, zi, zg)
-                for (dev, replica), zi, zg in active
+                pool.submit(_run_shard, dev, replica, zi, zg, mu)
+                for (dev, replica), zi, zg, mu in active
             ]
             results = [f.result() for f in futures]
 
-        return np.concatenate(results, axis=0)
+        # Merge updated warm-starts back into self._warmstart.
+        new_mus = [r[1] for r in results if r[1] is not None]
+        if new_mus:
+            self._warmstart["mu_mac"] = torch.cat(new_mus, dim=0)
+
+        return np.concatenate([r[0] for r in results], axis=0)
 
     def get_action(self, info_dict: dict, **kwargs) -> np.ndarray:
         """Plan and return the next primitive action for each environment.
@@ -184,7 +219,9 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         if len(self._gpu_replicas) > 1:
             eff = self._plan_multi_gpu(z_init, z_goal, plan_kwargs)
         else:
-            eff = plan_batched(self.model, z_init, z_goal, **plan_kwargs).cpu().numpy()
+            eff = plan_batched(
+                self.model, z_init, z_goal, warmstart=self._warmstart, **plan_kwargs
+            ).cpu().numpy()
         _plan_elapsed = time.perf_counter() - _t0
         self._total_plan_time += _plan_elapsed
         py_log.info("  plan done in %.2f s  (total planning time: %.1f s)", _plan_elapsed, self._total_plan_time)
@@ -197,10 +234,11 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                 if self._eval_budget:
                     self._total_plan_steps = max(1, self._eval_budget // self._frameskip)
             fs = self._frameskip
-            # reshape to (E * fs, base_dim), inverse-transform, reshape to (fs, E, base_dim)
-            prim = eff.reshape(n_envs * fs, base_dim)
-            prim = scaler.inverse_transform(prim)
-            prim = prim.reshape(fs, n_envs, base_dim)
+            # eff is (E, fs*base_dim); split env-outer then swap to (fs, E, base_dim).
+            # A flat reshape (E*fs, base_dim) → (fs, E, base_dim) is wrong in C-order
+            # because it treats the first axis as timestep-outer instead of env-outer.
+            prim = scaler.inverse_transform(eff.reshape(n_envs * fs, base_dim))  # (E*fs, base_dim)
+            prim = prim.reshape(n_envs, fs, base_dim).swapaxes(0, 1)             # (fs, E, base_dim)
         else:
             base_dim = eff.shape[-1]
             if self._frameskip is None:
