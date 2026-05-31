@@ -463,7 +463,8 @@ def train_hierarchical_lewm(
     ss_start: float = 1.0,
     ss_end: float = 0.25,
     weight_decay: float = 0.01,
-    select_by: str = "ar",
+    select_by: str = "tf",
+    ar_every: int = 5,
 ) -> HierarchicalLeWM:
     """Jointly optimise A_ψ and P^(2) on L_tf (stage 2).
 
@@ -489,10 +490,16 @@ def train_hierarchical_lewm(
                           (epoch 0) to ss_end (final epoch). 1.0 = teacher forcing, 0.0 =
                           full free-running. Only used when rollout_loss=True.
     weight_decay        : AdamW weight decay on the stage-2 params (A_ψ, P^(2)).
-    select_by           : checkpoint-selection metric — "ar" (free-running rollout MSE,
-                          stage2/val_loss_ar_pred; matches how the planner uses P²) or "tf"
-                          (teacher-forced stage2/val_loss, legacy). Each val pass logs both
-                          regardless; this only decides which one gates the "best" ckpt.
+    select_by           : checkpoint-selection metric — "tf" (teacher-forced
+                          stage2/val_loss, default; computed every epoch) or "ar"
+                          (free-running rollout MSE, stage2/val_loss_ar_pred; matches how
+                          the planner uses P²). NOTE: with select_by="ar", AR must be
+                          computed on every epoch — set ar_every=1 — else selection only
+                          sees the throttled AR epochs.
+    ar_every            : run the (expensive sequential) free-running AR val pass only
+                          every `ar_every` epochs (and always on the final epoch); other
+                          epochs compute the cheap teacher-forced val loss only. AR metrics
+                          are absent from W&B on the skipped epochs.
     ckpt_callback       : optional ModelObjectCallBack; if set, its save_epoch() is
                           called each epoch to pickle the model (same naming/location
                           convention as stage-1)
@@ -595,20 +602,31 @@ def train_hierarchical_lewm(
 
         val_str = ""
         if val_dataloader is not None and len(val_dataloader) > 0:
+            # The free-running AR pass is a sequential rollout (expensive); run it only
+            # every ar_every epochs and on the final epoch. The teacher-forced val loss
+            # (the default selection metric) is computed every epoch.
+            run_ar = ((epoch + 1) % max(1, ar_every) == 0) or (epoch + 1 == n_epochs)
             val_metrics = _validate_hierarchical(
-                model, val_dataloader, n_waypoints, freeze_encoder, device
+                model, val_dataloader, n_waypoints, freeze_encoder, device,
+                run_ar=run_ar,
             )
             epoch_metrics.update(val_metrics)
+            ar_str = (
+                f"val_ar: {val_metrics['stage2/val_loss_ar_pred']:.5f}  "
+                if "stage2/val_loss_ar_pred" in val_metrics else ""
+            )
             val_str = (
                 f"  | val_loss: {val_metrics['stage2/val_loss']:.5f}  "
-                f"val_ar: {val_metrics['stage2/val_loss_ar_pred']:.5f}  "
+                f"{ar_str}"
                 f"val_kl: {val_metrics['stage2/val_loss_kl']:.5f}  "
                 f"val_var: {val_metrics['stage2/val_loss_var']:.5f}"
             )
 
             # Track the best model by the selection metric (`select_by`); keep one stable
             # checkpoint on disk and defer the (single) W&B artifact upload to end of run.
-            if val_metrics[sel_key] < best_val_loss and ckpt_callback is not None:
+            # If selecting by AR on an epoch where AR was skipped, sel_key is absent, so
+            # that epoch simply isn't a candidate.
+            if sel_key in val_metrics and val_metrics[sel_key] < best_val_loss and ckpt_callback is not None:
                 best_val_loss = val_metrics[sel_key]
                 best_epoch = epoch + 1
                 best_metrics = dict(val_metrics)
@@ -637,7 +655,7 @@ def train_hierarchical_lewm(
                 "select_by": select_by,
                 "select_metric": best_val_loss,
                 "val_loss": best_metrics["stage2/val_loss"],
-                "val_loss_ar_pred": best_metrics["stage2/val_loss_ar_pred"],
+                "val_loss_ar_pred": best_metrics.get("stage2/val_loss_ar_pred"),
                 "epoch": best_epoch,
             },
         )
@@ -646,15 +664,18 @@ def train_hierarchical_lewm(
         wandb_run.summary["stage2/best_select_by"] = select_by
         wandb_run.summary["stage2/best_select_metric"] = best_val_loss
         wandb_run.summary["stage2/best_val_loss"] = best_metrics["stage2/val_loss"]
-        wandb_run.summary["stage2/best_val_loss_ar_pred"] = best_metrics["stage2/val_loss_ar_pred"]
+        if "stage2/val_loss_ar_pred" in best_metrics:
+            wandb_run.summary["stage2/best_val_loss_ar_pred"] = best_metrics["stage2/val_loss_ar_pred"]
         wandb_run.summary["stage2/best_epoch"] = best_epoch
         print(f"registered best model (epoch {best_epoch}, {select_by}={best_val_loss:.5f}) to W&B")
 
     if best_metrics is not None:
+        ar_best = best_metrics.get("stage2/val_loss_ar_pred")
+        ar_best_str = f"val_ar: {ar_best:.5f}  " if ar_best is not None else ""
         print(
             f"best model ({select_by}) — epoch {best_epoch}/{n_epochs}  "
             f"val_loss: {best_metrics['stage2/val_loss']:.5f}  "
-            f"val_ar: {best_metrics['stage2/val_loss_ar_pred']:.5f}  "
+            f"{ar_best_str}"
             f"val_kl: {best_metrics['stage2/val_loss_kl']:.5f}  "
             f"ckpt: {best_ckpt_path}"
         )
@@ -669,15 +690,19 @@ def _validate_hierarchical(
     n_waypoints: int,
     freeze_encoder: bool,
     device: str,
+    run_ar: bool = True,
 ) -> dict:
-    """Held-out passes computing teacher-forced AND free-running (AR) losses.
+    """Held-out teacher-forced loss, plus an optional free-running (AR) loss.
 
-    Two passes per batch on the same (deterministic fixed-stride) waypoints:
+    On the same (deterministic fixed-stride) waypoints:
       - teacher-forced (tf_prob=1.0): every prediction conditions on the TRUE previous
         waypoints — the classic `stage2/val_loss`, comparable to train loss at tf_prob=1.
-      - free-running (tf_prob=0.0): the model feeds back its OWN predictions at every step,
-        so this measures multi-step autoregressive fidelity — the regime the *planner*
-        actually uses. `stage2/val_loss_ar_pred` is the metric to select checkpoints on.
+        Always computed; cheap (one parallel pass).
+      - free-running (tf_prob=0.0): the model feeds back its OWN predictions every step,
+        measuring multi-step autoregressive fidelity — the regime the planner uses. This
+        is a sequential rollout (n_seg forward passes), so it is only run when `run_ar`
+        is True (the caller throttles it via ar_every). When skipped, the
+        `stage2/val_loss_ar*` keys are absent from the returned dict.
 
     eval() disables dropout in A_ψ / P^(2) (the inner JEPA stays in eval via train()).
     """
@@ -701,22 +726,25 @@ def _validate_hierarchical(
         val_var  += out["loss_var"].item()
         val_kl   += out["loss_kl"].item()
 
-        # Free-running rollout: tf_prob=0.0 deterministically feeds back predictions.
-        out_ar = model.forward_high(
-            batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=0.0
-        )
-        ar_loss += out_ar["loss"].item()
-        ar_pred += out_ar["loss_pred"].item()
+        if run_ar:
+            # Free-running rollout: tf_prob=0.0 deterministically feeds back predictions.
+            out_ar = model.forward_high(
+                batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=0.0
+            )
+            ar_loss += out_ar["loss"].item()
+            ar_pred += out_ar["loss_pred"].item()
 
     if was_training:
         model.train()
 
     nv = len(val_dataloader)
-    return {
-        "stage2/val_loss":         val_loss / nv,
-        "stage2/val_loss_pred":    val_pred / nv,
-        "stage2/val_loss_var":     val_var  / nv,
-        "stage2/val_loss_kl":      val_kl   / nv,
-        "stage2/val_loss_ar":      ar_loss  / nv,
-        "stage2/val_loss_ar_pred": ar_pred  / nv,
+    metrics = {
+        "stage2/val_loss":      val_loss / nv,
+        "stage2/val_loss_pred": val_pred / nv,
+        "stage2/val_loss_var":  val_var  / nv,
+        "stage2/val_loss_kl":   val_kl   / nv,
     }
+    if run_ar:
+        metrics["stage2/val_loss_ar"]      = ar_loss / nv
+        metrics["stage2/val_loss_ar_pred"] = ar_pred / nv
+    return metrics

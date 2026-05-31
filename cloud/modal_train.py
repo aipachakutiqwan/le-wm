@@ -44,7 +44,9 @@ import modal
 
 GHCR_OWNER = "jadhavan"
 IMAGE_NAME  = "lewm"
-GPU         = "A100"
+# "A100" = A100-40GB, "A100-80GB" = 80GB. Override per-run without editing code:
+#   LEWM_GPU=A100-80GB modal run cloud/modal_train.py::...
+GPU         = os.environ.get("LEWM_GPU", "A100-80GB")
 EVAL_GPU    = "A10G"
 _REPO_ROOT  = Path(__file__).parent.parent
 

@@ -151,6 +151,8 @@ def run(cfg):
         ss_start=cfg.stage2.get("ss_start", 1.0),
         ss_end=cfg.stage2.get("ss_end", 0.25),
         weight_decay=cfg.stage2.get("weight_decay", 0.01),
+        select_by=cfg.stage2.get("select_by", "tf"),
+        ar_every=cfg.stage2.get("ar_every", 5),
     )
 
     out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"

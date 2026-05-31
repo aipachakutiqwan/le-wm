@@ -43,6 +43,11 @@ stage2:
   # Regularisation for A_ψ / P^(2) (held-out TF loss 0.84 vs train 0.17 -> overfitting).
   dropout: 0.0            # dropout inside A_ψ and P^(2) transformers
   weight_decay: 0.01      # AdamW weight decay on stage-2 params (default 0.01)
+  # Checkpoint selection: "tf" = teacher-forced val_loss (every epoch, the old way);
+  # "ar" = free-running rollout MSE (only computed every `ar_every` epochs — set
+  # ar_every=1 if selecting by "ar").
+  select_by: tf
+  ar_every: 5             # run the (expensive) free-running AR val pass every N epochs
 
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.
