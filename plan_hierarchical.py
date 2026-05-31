@@ -224,7 +224,8 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             ).cpu().numpy()
         _plan_elapsed = time.perf_counter() - _t0
         self._total_plan_time += _plan_elapsed
-        py_log.info("  plan done in %.2f s  (total planning time: %.1f s)", _plan_elapsed, self._total_plan_time)
+        py_log.info("  plan done in %.1f s / %.2f min  (total: %.1f s / %.1f min)",
+                    _plan_elapsed, _plan_elapsed / 60, self._total_plan_time, self._total_plan_time / 60)
 
         if "action" in self.process:
             scaler = self.process["action"]
@@ -397,7 +398,8 @@ def run(cfg: DictConfig):
 
     py_log.info("metrics: %s", metrics)
     py_log.info("evaluation time:      %.1f s (%.1f min)", elapsed, elapsed / 60)
-    py_log.info("total planning time:  %.1f s (%.1f%% of eval)", policy._total_plan_time, 100 * policy._total_plan_time / elapsed)
+    py_log.info("total planning time:  %.1f s (%.1f min, %.1f%% of eval)",
+                policy._total_plan_time, policy._total_plan_time / 60, 100 * policy._total_plan_time / elapsed)
 
     sr = metrics.get("success_rate", metrics.get("success", float("nan")))
     env_slug = cfg.dataset.name.replace("/", "_")

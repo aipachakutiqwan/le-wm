@@ -151,8 +151,9 @@ def plan(
     if py_log.isEnabledFor(logging.DEBUG):
         inner_cost_val = inner_cost(best_act.unsqueeze(0)).item()
         py_log.debug("inner CEM — best_cost=%.4f", inner_cost_val)
-    py_log.info("inner CEM — ms=%.1f  total_ms=%.1f",
-                (time.perf_counter() - t_inner) * 1e3, (time.perf_counter() - t0) * 1e3)
+    total_s = time.perf_counter() - t0
+    py_log.info("inner CEM — ms=%.1f  total=%.1fs (%.2f min)",
+                (time.perf_counter() - t_inner) * 1e3, total_s, total_s / 60)
 
     return best_act[0]   # first primitive action: (action_dim,)
 
@@ -296,7 +297,8 @@ def plan_batched(
     if py_log.isEnabledFor(logging.DEBUG):
         py_log.debug("inner CEM — mean_best_cost=%.4f",
                      inner_cost(best_act.unsqueeze(1)).mean().item())
-    py_log.info("inner CEM — ms=%.1f  total_ms=%.1f",
-                (time.perf_counter() - t_inner) * 1e3, (time.perf_counter() - t0) * 1e3)
+    total_s = time.perf_counter() - t0
+    py_log.info("inner CEM — ms=%.1f  total=%.1fs (%.2f min)",
+                (time.perf_counter() - t_inner) * 1e3, total_s, total_s / 60)
 
     return best_act[:, 0]   # (E, action_dim)
