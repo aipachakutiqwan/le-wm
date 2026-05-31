@@ -298,6 +298,11 @@ def run(cfg: DictConfig):
 
     py_log.info("Loading checkpoint from %s", cfg.checkpoint)
     model = torch.load(cfg.checkpoint, map_location=cfg.device, weights_only=False)
+    # Unwrap any torch.compile wrappers saved into the checkpoint.
+    # OptimizedModules cannot be deepcopy'd across threads (_plan_multi_gpu)
+    # and trigger FX tracing errors when called from a ThreadPoolExecutor.
+    model.action_encoder_high = getattr(model.action_encoder_high, '_orig_mod', model.action_encoder_high)
+    model.high_predictor = getattr(model.high_predictor, '_orig_mod', model.high_predictor)
 
     policy = HierarchicalPolicy(
         model=model,

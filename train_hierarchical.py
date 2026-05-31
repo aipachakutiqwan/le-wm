@@ -154,6 +154,21 @@ class EpochTimer(Callback):
         py_log.info("training complete — total time: %.1f s (%.1f min)", total, total / 60)
 
 
+def _save_model(model, path: Path) -> None:
+    """Save model with torch.compile wrappers stripped (portable checkpoint).
+
+    Temporarily swaps OptimizedModules back to their originals, saves, then
+    restores so training continues with the compiled versions.
+    """
+    compiled_ae = model.action_encoder_high
+    compiled_hp = model.high_predictor
+    model.action_encoder_high = getattr(compiled_ae, '_orig_mod', compiled_ae)
+    model.high_predictor = getattr(compiled_hp, '_orig_mod', compiled_hp)
+    torch.save(model, path)
+    model.action_encoder_high = compiled_ae
+    model.high_predictor = compiled_hp
+
+
 class EpochCheckpoint(Callback):
     """Save module.model as a plain torch object after every epoch (rank 0 only)."""
 
@@ -166,7 +181,7 @@ class EpochCheckpoint(Callback):
             return
         epoch = trainer.current_epoch + 1
         path = self.run_dir / f"{self.model_name}_epoch_{epoch}_object.ckpt"
-        torch.save(pl_module.model, path)
+        _save_model(pl_module.model, path)
         py_log.info("Saved epoch-%d checkpoint to %s", epoch, path)
 
 
@@ -309,7 +324,7 @@ def run(cfg):
 
     if trainer.is_global_zero:
         out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
-        torch.save(module.model, out_path)
+        _save_model(module.model, out_path)
         py_log.info("Saved hierarchical model to %s", out_path)
 
 
