@@ -406,7 +406,8 @@ def run(cfg: DictConfig):
         f"{env_slug}"
         f"_sr{sr:.2f}"
         f"_H{p.H_high}_h{p.h_low}"
-        f"_S{p.outer_samples}_oi{p.outer_iters}_ii{p.inner_iters}"
+        f"_oS{p.outer_samples}_oi{p.outer_iters}"
+        f"_iS{p.inner_samples}_ii{p.inner_iters}"
         f"_n{cfg.eval.num_eval}_bgt{cfg.eval.eval_budget}"
         f".txt"
     )
