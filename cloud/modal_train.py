@@ -122,6 +122,27 @@ def download_data(envs: list[str] = ("tworoom",)) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+
+
+@app.function(image=DOWNLOAD_IMAGE, gpu=GPU, timeout=120)
+def _probe_shm() -> None:
+    """One-off probe: print /dev/shm size and other container limits on an A100 node."""
+    import shutil
+    total, used, free = shutil.disk_usage("/dev/shm")
+    print(f"[probe] /dev/shm  total={total/1e9:.2f}GB  used={used/1e6:.1f}MB  free={free/1e9:.2f}GB", flush=True)
+    subprocess.run(["df", "-h", "/dev/shm"], check=False)
+    subprocess.run(["mount"], check=False)
+
+
+@app.local_entrypoint()
+def probe_shm():
+    """Print the /dev/shm size visible inside a Modal A100 container."""
+    _probe_shm.remote()
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
