@@ -56,5 +56,4 @@ eval:
         target_qpos:
           value: goal_qpos
 
-output:
-  filename: hierarchical_reacher_results.txt
+output: {}  # filename is built automatically: {env}_H{H_high}_h{h_low}_oi{oi}_ii{ii}_n{n}_seed{seed}_sr{sr}.txt
