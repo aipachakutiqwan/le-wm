@@ -45,6 +45,16 @@ stage2:
   ss_max_prob: 0.5               # scheduled sampling: max prob of feeding back own prediction
   ss_ramp_epochs: 30             # linearly ramp ss_prob 0 → ss_max_prob over first N epochs
 
+# Stage-1 JEPA predictor architecture — must match the checkpoint being loaded.
+# Only used when stage1_checkpoint points to a weights.pt (state-dict) file.
+predictor:
+  depth: 6
+  heads: 16
+  mlp_dim: 2048
+  dim_head: 64
+  dropout: 0.1
+  emb_dropout: 0.0
+
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.
 wm:

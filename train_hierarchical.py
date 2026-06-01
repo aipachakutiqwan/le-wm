@@ -42,9 +42,56 @@ from omegaconf import OmegaConf, open_dict
 from torchvision.transforms import v2 as T
 
 from hierarchical_lewm import HierarchicalLeWM, HierarchicalLeWMModule
+from jepa import JEPA
+from module import ARPredictor, Embedder, MLP
 from utils import get_column_normalizer
 
 py_log = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# JEPA builder  (used when loading from weights.pt state-dict format)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _build_jepa(cfg, effective_act_dim: int) -> JEPA:
+    """Reconstruct JEPA architecture from config and return an un-initialised model.
+
+    The caller must load a state dict into the returned model.  The architecture
+    must exactly match the stage-1 run that produced the weights.pt file.
+    """
+    encoder = spt.backbone.utils.vit_hf(
+        cfg.encoder_scale,
+        patch_size=cfg.patch_size,
+        image_size=cfg.img_size,
+        pretrained=False,
+        use_mask_token=False,
+    )
+    hidden_dim = encoder.config.hidden_size
+    embed_dim = cfg.wm.get("embed_dim", hidden_dim)
+    predictor = ARPredictor(
+        num_frames=cfg.wm.history_size,
+        input_dim=embed_dim,
+        hidden_dim=hidden_dim,
+        output_dim=hidden_dim,
+        **cfg.predictor,
+    )
+    action_encoder = Embedder(input_dim=effective_act_dim, emb_dim=embed_dim)
+    projector = MLP(
+        input_dim=hidden_dim, output_dim=embed_dim,
+        hidden_dim=2048, norm_fn=torch.nn.BatchNorm1d,
+    )
+    pred_proj = MLP(
+        input_dim=hidden_dim, output_dim=embed_dim,
+        hidden_dim=2048, norm_fn=torch.nn.BatchNorm1d,
+    )
+    return JEPA(
+        encoder=encoder,
+        predictor=predictor,
+        action_encoder=action_encoder,
+        projector=projector,
+        pred_proj=pred_proj,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -228,7 +275,17 @@ def run(cfg):
     ##############################
 
     py_log.info("Loading stage-1 checkpoint from %s", cfg.stage1_checkpoint)
-    jepa = torch.load(cfg.stage1_checkpoint, map_location="cpu", weights_only=False)
+    ckpt_path = Path(cfg.stage1_checkpoint)
+    if ckpt_path.suffix == ".pt":
+        # weights.pt format: state dict only — rebuild architecture from config.
+        effective_act_dim_jepa = cfg.data.dataset.frameskip * dataset.get_dim("action")
+        jepa = _build_jepa(cfg, effective_act_dim_jepa)
+        state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        jepa.load_state_dict(state)
+        py_log.info("Loaded state dict from %s", ckpt_path)
+    else:
+        # Legacy object format (.ckpt) — full pickle load.
+        jepa = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     jepa.eval()
 
     ##############################
