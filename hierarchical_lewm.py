@@ -10,6 +10,9 @@ New components (jepa.py and module.py are not modified):
 See hierarchical_plan.py for the two-level CEM-MPC planner.
 """
 
+import logging
+import time
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -17,6 +20,8 @@ from torch import nn
 from jepa import JEPA
 from module import ARPredictor
 from waypoint_sampler import sample_waypoints_fixed_stride
+
+py_log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -537,13 +542,17 @@ def train_hierarchical_lewm(
     best_epoch = None
     best_ckpt_path = None
     best_metrics = None
-    # Checkpoint-selection metric: "ar" = free-running rollout MSE (matches how the planner
-    # uses P²); "tf" = teacher-forced val loss (legacy). AR is the recommended default.
     if select_by not in ("ar", "tf"):
         raise ValueError(f"select_by must be 'ar' or 'tf', got {select_by!r}")
     sel_key = "stage2/val_loss_ar_pred" if select_by == "ar" else "stage2/val_loss"
+
+    t_train = time.perf_counter()
+    py_log.info(
+        "stage-2 training start — epochs=%d  steps/epoch=%d  device=%s  amp=%s  compile=%s",
+        n_epochs, len(dataloader), device, amp_enabled, compile_model,
+    )
+
     for epoch in range(n_epochs):
-        # Scheduled sampling: anneal teacher-forcing prob ss_start -> ss_end over epochs.
         if rollout_loss:
             frac = epoch / max(1, n_epochs - 1)
             tf_prob = ss_start + (ss_end - ss_start) * frac
@@ -552,12 +561,17 @@ def train_hierarchical_lewm(
 
         epoch_loss = epoch_pred = epoch_var = epoch_kl = 0.0
         epoch_mac_absmean = epoch_mac_std = 0.0
+        epoch_step_ms = 0.0
+        t_epoch = time.perf_counter()
+
         for batch in dataloader:
+            t_step = time.perf_counter()
             batch = {
-                k: v.to(device) if torch.is_tensor(v) else v
+                k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v
                 for k, v in batch.items()
             }
-            T = batch["pixels"].shape[1]
+            # Use action length for T — works with both pixel and embedding-cache batches.
+            T = batch["action"].shape[1]
             wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
@@ -571,23 +585,32 @@ def train_hierarchical_lewm(
             grad_norm = torch.nn.utils.clip_grad_norm_(stage2_params, float("inf"))
             optimizer.step()
 
+            step_ms = (time.perf_counter() - t_step) * 1e3
+            B = batch["action"].shape[0]
+            samp_s = B / (step_ms / 1e3)
+
             loss_val = out["loss"].item()
             pred_val = out["loss_pred"].item()
             var_val  = out["loss_var"].item()
             kl_val   = out["loss_kl"].item()
-            # A_ψ macro-action distribution vs the planner's N(0,1) prior — what the KL
-            # term actually steers. |mean| → 0 and std → 1 means the moment-matching worked.
             with torch.no_grad():
-                mac = out["macro_actions"]                       # (B, n_seg, d_L)
+                mac = out["macro_actions"]
                 mac_absmean = mac.mean(dim=(0, 1)).abs().mean().item()
                 mac_std = mac.std(dim=(0, 1)).mean().item()
+
             epoch_loss += loss_val
             epoch_pred += pred_val
             epoch_var  += var_val
             epoch_kl   += kl_val
             epoch_mac_absmean += mac_absmean
             epoch_mac_std     += mac_std
+            epoch_step_ms     += step_ms
             global_step += 1
+
+            py_log.debug(
+                "step %d  loss=%.4f  pred=%.4f  kl=%.4f  gnorm=%.3f  %.1f ms  %.0f samp/s",
+                global_step, loss_val, pred_val, kl_val, grad_norm.item(), step_ms, samp_s,
+            )
 
             if wandb_run is not None and global_step % log_every_n_steps == 0:
                 wandb_run.log({
@@ -598,61 +621,65 @@ def train_hierarchical_lewm(
                     "stage2/macro_absmean": mac_absmean,
                     "stage2/macro_std":     mac_std,
                     "stage2/grad_norm":     grad_norm.item(),
+                    "stage2/step_ms":       step_ms,
+                    "stage2/samples_per_sec": samp_s,
                 }, step=global_step)
 
         n = len(dataloader)
+        epoch_s = time.perf_counter() - t_epoch
+        avg_step_ms = epoch_step_ms / n
         epoch_metrics = {
-            "stage2/epoch_loss":         epoch_loss / n,
-            "stage2/epoch_loss_pred":    epoch_pred / n,
-            "stage2/epoch_loss_var":     epoch_var  / n,
-            "stage2/epoch_loss_kl":      epoch_kl   / n,
+            "stage2/epoch_loss":          epoch_loss / n,
+            "stage2/epoch_loss_pred":     epoch_pred / n,
+            "stage2/epoch_loss_var":      epoch_var  / n,
+            "stage2/epoch_loss_kl":       epoch_kl   / n,
             "stage2/epoch_macro_absmean": epoch_mac_absmean / n,
             "stage2/epoch_macro_std":     epoch_mac_std / n,
-            "stage2/epoch":              epoch + 1,
-            "stage2/tf_prob":            tf_prob,
-            "stage2/lr":                 scheduler.get_last_lr()[0],
+            "stage2/epoch":               epoch + 1,
+            "stage2/tf_prob":             tf_prob,
+            "stage2/lr":                  scheduler.get_last_lr()[0],
+            "stage2/epoch_s":             epoch_s,
+            "stage2/avg_step_ms":         avg_step_ms,
         }
         scheduler.step()
 
         val_str = ""
         if val_dataloader is not None and len(val_dataloader) > 0:
-            # The free-running AR pass is a sequential rollout (expensive); run it only
-            # every ar_every epochs and on the final epoch. The teacher-forced val loss
-            # (the default selection metric) is computed every epoch.
             run_ar = ((epoch + 1) % max(1, ar_every) == 0) or (epoch + 1 == n_epochs)
+            t_val = time.perf_counter()
             val_metrics = _validate_hierarchical(
                 model, val_dataloader, n_waypoints, freeze_encoder, device,
                 run_ar=run_ar, device_type=device_type, amp_enabled=amp_enabled,
             )
+            val_s = time.perf_counter() - t_val
             epoch_metrics.update(val_metrics)
+            epoch_metrics["stage2/val_s"] = val_s
             ar_str = (
-                f"val_ar: {val_metrics['stage2/val_loss_ar_pred']:.5f}  "
+                f"val_ar={val_metrics['stage2/val_loss_ar_pred']:.5f}  "
                 if "stage2/val_loss_ar_pred" in val_metrics else ""
             )
             val_str = (
-                f"  | val_loss: {val_metrics['stage2/val_loss']:.5f}  "
+                f"  val={val_metrics['stage2/val_loss']:.5f}  "
                 f"{ar_str}"
-                f"val_kl: {val_metrics['stage2/val_loss_kl']:.5f}  "
-                f"val_var: {val_metrics['stage2/val_loss_var']:.5f}"
+                f"val_kl={val_metrics['stage2/val_loss_kl']:.5f}  "
+                f"({val_s:.1f}s)"
             )
 
-            # Track the best model by the selection metric (`select_by`); keep one stable
-            # checkpoint on disk and defer the (single) W&B artifact upload to end of run.
-            # If selecting by AR on an epoch where AR was skipped, sel_key is absent, so
-            # that epoch simply isn't a candidate.
             if sel_key in val_metrics and val_metrics[sel_key] < best_val_loss and ckpt_callback is not None:
                 best_val_loss = val_metrics[sel_key]
                 best_epoch = epoch + 1
                 best_metrics = dict(val_metrics)
                 best_ckpt_path = ckpt_callback.save_best(model)
-                val_str += f"  (new best {select_by})"
+                val_str += "  ★ best"
 
-        print(
-            f"epoch {epoch + 1}/{n_epochs}  "
-            f"loss: {epoch_loss/n:.5f}  pred: {epoch_pred/n:.5f}  "
-            f"kl: {epoch_kl/n:.5f}  var: {epoch_var/n:.5f}  "
-            f"macro(|mean|/std): {epoch_mac_absmean/n:.3f}/{epoch_mac_std/n:.3f}"
-            f"{val_str}"
+        py_log.info(
+            "epoch %d/%d  loss=%.5f  pred=%.5f  kl=%.5f  "
+            "mac(|μ|/σ)=%.3f/%.3f  lr=%.2e  %.1fs  %.1fms/step%s",
+            epoch + 1, n_epochs,
+            epoch_loss / n, epoch_pred / n, epoch_kl / n,
+            epoch_mac_absmean / n, epoch_mac_std / n,
+            scheduler.get_last_lr()[0], epoch_s, avg_step_ms,
+            val_str,
         )
         if wandb_run is not None:
             wandb_run.log(epoch_metrics, step=global_step)
@@ -681,18 +708,23 @@ def train_hierarchical_lewm(
         if "stage2/val_loss_ar_pred" in best_metrics:
             wandb_run.summary["stage2/best_val_loss_ar_pred"] = best_metrics["stage2/val_loss_ar_pred"]
         wandb_run.summary["stage2/best_epoch"] = best_epoch
-        print(f"registered best model (epoch {best_epoch}, {select_by}={best_val_loss:.5f}) to W&B")
+        py_log.info(
+            "registered best model — epoch %d  %s=%.5f  to W&B",
+            best_epoch, select_by, best_val_loss,
+        )
 
+    total_s = time.perf_counter() - t_train
     if best_metrics is not None:
         ar_best = best_metrics.get("stage2/val_loss_ar_pred")
-        ar_best_str = f"val_ar: {ar_best:.5f}  " if ar_best is not None else ""
-        print(
-            f"best model ({select_by}) — epoch {best_epoch}/{n_epochs}  "
-            f"val_loss: {best_metrics['stage2/val_loss']:.5f}  "
-            f"{ar_best_str}"
-            f"val_kl: {best_metrics['stage2/val_loss_kl']:.5f}  "
-            f"ckpt: {best_ckpt_path}"
+        ar_str = f"  val_ar={ar_best:.5f}" if ar_best is not None else ""
+        py_log.info(
+            "training complete — %.1fs (%.1f min)  best epoch %d/%d  "
+            "val_loss=%.5f%s  ckpt=%s",
+            total_s, total_s / 60, best_epoch, n_epochs,
+            best_metrics["stage2/val_loss"], ar_str, best_ckpt_path,
         )
+    else:
+        py_log.info("training complete — %.1fs (%.1f min)", total_s, total_s / 60)
 
     return model
 
@@ -726,12 +758,13 @@ def _validate_hierarchical(
     model.eval()
     val_loss = val_pred = val_var = val_kl = 0.0
     ar_loss = ar_pred = 0.0
+    t_val_start = time.perf_counter()
     for batch in val_dataloader:
         batch = {
-            k: v.to(device) if torch.is_tensor(v) else v
+            k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v
             for k, v in batch.items()
         }
-        T = batch["pixels"].shape[1]
+        T = batch["action"].shape[1]
         wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
 
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):

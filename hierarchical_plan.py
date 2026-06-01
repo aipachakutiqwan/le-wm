@@ -9,9 +9,14 @@ they directly use its weights; planning logic that is independent of model
 parameters lives here.
 """
 
+import logging
+import time
+
 import torch
 
 from hierarchical_lewm import HierarchicalLeWM
+
+py_log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -43,7 +48,8 @@ def cem(
     (*shape,) optimised mean
     """
     n_elites = max(1, int(n_samples * elite_frac))
-    for _ in range(n_iters):
+    for i in range(n_iters):
+        t_iter = time.perf_counter()
         eps = torch.randn(n_samples, *mu.shape, device=mu.device)
         candidates = mu.unsqueeze(0) + std.unsqueeze(0) * eps   # (S, *shape)
         costs = cost_fn(candidates)                              # (S,)
@@ -51,6 +57,11 @@ def cem(
         elites = candidates[elite_idx]
         mu = elites.mean(0)
         std = elites.std(0).clamp(min=0.1)
+        py_log.debug(
+            "  cem iter %d/%d  best_cost=%.4f  std_mean=%.3f  %.1f ms",
+            i + 1, n_iters, costs[elite_idx[0]].item(), std.mean().item(),
+            (time.perf_counter() - t_iter) * 1e3,
+        )
     return mu
 
 
@@ -73,6 +84,7 @@ def plan(
     outer_std: float = 5.0,
     inner_std: float = 1.0,
     warmstart: dict | None = None,
+    stats: dict | None = None,
 ) -> torch.Tensor:
     """Two-level CEM-MPC. Returns the first primitive action to execute.
 
@@ -110,6 +122,10 @@ def plan(
                      that tensor with halved std (near-solution warm-start). Updated
                      in-place after each call so callers only need to pass the same dict
                      every re-plan step.
+    stats          : optional mutable dict for accumulating totals across calls.
+                     Keys updated in-place: ``n_calls``, ``total_ms``, ``outer_ms``,
+                     ``inner_ms``.  Pass the same dict on every MPC step then read it
+                     at the end for a full planning session summary.
 
     Returns
     -------
@@ -119,18 +135,25 @@ def plan(
     d_L = model.latent_action_dim
     device_type = device.type if hasattr(device, "type") else str(device).split(":")[0]
     amp_enabled = device_type == "cuda"
+    t0 = time.perf_counter()
 
     # Progressive weights: later subgoals matter more; normalised to sum = 1.
     w_high = torch.linspace(1.0 / H_high, 1.0, H_high, device=device)
     w_high = w_high / w_high.sum()                                        # (H,)
 
     # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
-    if warmstart is not None and "mu_mac" in warmstart:
+    warm = warmstart is not None and "mu_mac" in warmstart
+    if warm:
         mu_mac = warmstart["mu_mac"].to(device)
-        std_mac = torch.full((H_high, d_L), outer_std / 2, device=device)  # tighter
+        std_mac = torch.full((H_high, d_L), outer_std / 2, device=device)
     else:
         mu_mac = torch.zeros(H_high, d_L, device=device)
         std_mac = torch.full((H_high, d_L), outer_std, device=device)
+
+    py_log.debug(
+        "outer CEM — S=%d  iters=%d  H=%d  warm=%s",
+        outer_samples, outer_iters, H_high, warm,
+    )
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, H_high, d_L)
@@ -139,8 +162,11 @@ def plan(
         dists = (subgoals - z_goal.unsqueeze(0).unsqueeze(1)).abs().sum(-1)  # (S, H)
         return (dists * w_high.unsqueeze(0)).sum(-1)                       # (S,)
 
+    t_outer = time.perf_counter()
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
-    # best_mac: (H_high, d_L)
+    outer_ms = (time.perf_counter() - t_outer) * 1e3
+    outer_cost_val = outer_cost(best_mac.unsqueeze(0)).item()
+    py_log.info("outer CEM — best_cost=%.4f  %.1f ms", outer_cost_val, outer_ms)
 
     if warmstart is not None:
         warmstart["mu_mac"] = best_mac.cpu()
@@ -153,13 +179,31 @@ def plan(
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
     std_act = torch.full((h_low, model.action_dim), inner_std, device=device)
 
+    py_log.debug(
+        "inner CEM — S=%d  iters=%d  h=%d",
+        inner_samples, inner_iters, h_low,
+    )
+
     def inner_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, h_low, action_dim)
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
             z_final = model._rollout_low(z_init, candidates)               # (S, D)
         return (z_final - z_sg.unsqueeze(0)).abs().sum(-1)                 # (S,)
 
+    t_inner = time.perf_counter()
     best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters)
-    # best_act: (h_low, action_dim)
+    inner_ms = (time.perf_counter() - t_inner) * 1e3
+    inner_cost_val = inner_cost(best_act.unsqueeze(0)).item()
+    total_ms = (time.perf_counter() - t0) * 1e3
+    py_log.info(
+        "inner CEM — best_cost=%.4f  %.1f ms  |  total plan=%.1f ms",
+        inner_cost_val, inner_ms, total_ms,
+    )
+
+    if stats is not None:
+        stats["n_calls"]  = stats.get("n_calls",  0)   + 1
+        stats["total_ms"] = stats.get("total_ms", 0.0) + total_ms
+        stats["outer_ms"] = stats.get("outer_ms", 0.0) + outer_ms
+        stats["inner_ms"] = stats.get("inner_ms", 0.0) + inner_ms
 
     return best_act[0]   # first primitive action: (action_dim,)

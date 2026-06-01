@@ -115,6 +115,7 @@ def _ensure_embeddings(
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
 def run(cfg):
+    t_run = time.perf_counter()
     py_log.info(
         "Hierarchical stage-2 training — data=%s checkpoint=%s",
         cfg.data.dataset.name,
@@ -254,6 +255,12 @@ def run(cfg):
     out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
     torch.save(model, out_path)
     py_log.info("Saved hierarchical model to %s", out_path)
+
+    total_s = time.perf_counter() - t_run
+    py_log.info(
+        "run complete — total time: %.1f s (%.1f min)  [data+cache+train+save]",
+        total_s, total_s / 60,
+    )
 
     if wandb_run is not None:
         wandb_run.finish()
