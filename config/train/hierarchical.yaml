@@ -20,10 +20,10 @@ train_split: 0.9
 device: cuda 
 
 loader:
-  batch_size: 64
-  num_workers: 6
+  batch_size: 512
+  num_workers: 12
   persistent_workers: True
-  prefetch_factor: 3
+  prefetch_factor: 4
   pin_memory: True
 
 # Stage-2 optimisation
@@ -48,6 +48,8 @@ stage2:
   # ar_every=1 if selecting by "ar").
   select_by: tf
   ar_every: 5             # run the (expensive) free-running AR val pass every N epochs
+  use_amp: True           # bf16 autocast on CUDA — ~2x throughput, no grad scaler needed
+  compile: False          # torch.compile A_ψ and P^(2); set True for long production runs
 
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.
@@ -76,6 +78,6 @@ wandb:
   config:
     entity: lewm
     project: lewm
-    name: ${output_model_name}
+    name: ${data.dataset.name}_wp${wm.n_waypoints}_dL${wm.latent_action_dim}_lr${stage2.lr}_kl${wm.lambda_kl}_bs${loader.batch_size}_ep${stage2.n_epochs}_rl${stage2.rollout_loss}
     id: ${subdir}
     resume: allow

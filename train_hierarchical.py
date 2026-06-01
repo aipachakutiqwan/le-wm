@@ -4,10 +4,14 @@ Stage 1 (JEPA) is trained by train.py.  This script loads the resulting
 checkpoint, wraps it in HierarchicalLeWM, and runs the stage-2 teacher-
 forcing loop that jointly trains A_ψ and P^(2).
 
+On first run the frozen JEPA encoder is applied once to every raw frame in the
+HDF5 dataset and the result is saved to disk.  Subsequent runs reuse the cached
+file, so the ViT forward pass is never repeated during training.
+
 Usage
 -----
 # TwoRoom (default data)
-python train_hierarchical.py stage1_checkpoint=<path/to/lewm_epoch_100_object.ckpt>
+python train_hierarchical.py stage1_checkpoint=<path/to/weights.pt>
 
 # Different dataset
 python train_hierarchical.py data=pusht stage1_checkpoint=<path>
@@ -19,17 +23,20 @@ python train_hierarchical.py stage1_checkpoint=<path> \\
 
 import os
 import logging
-from functools import partial
+import time
 from pathlib import Path
 
 py_log = logging.getLogger(__name__)
 
+import h5py
 import hydra
+import numpy as np
 import wandb
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
 from omegaconf import OmegaConf, open_dict
+from torchvision.transforms import v2 as T
 
 # DataLoader workers pass tensors via /dev/shm by default. Modal containers cap
 # /dev/shm small, so multi-worker loading with large batches blows it out with
@@ -37,7 +44,73 @@ from omegaconf import OmegaConf, open_dict
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 from hierarchical_lewm import HierarchicalLeWM, train_hierarchical_lewm
-from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
+from utils import get_column_normalizer, ModelObjectCallBack
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Embedding cache
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _ensure_embeddings(
+    jepa: torch.nn.Module,
+    h5_path: Path,
+    out_path: Path,
+    img_size: int,
+    device: str,
+    batch_size: int = 512,
+) -> np.ndarray:
+    """Return cached embeddings, computing and saving them first if needed.
+
+    The cache file is keyed to both the dataset and the stage-1 checkpoint stem
+    so switching checkpoints never produces stale embeddings.
+    """
+    if out_path.exists():
+        py_log.info("Reusing cached embeddings from %s", out_path)
+        return np.load(out_path, mmap_mode="r")
+
+    py_log.info("Embedding cache not found — computing from %s …", h5_path)
+    jepa.to(device).eval()
+    stats = spt.data.dataset_stats.ImageNet
+    transform = T.Compose([
+        T.ToDtype(torch.float32, scale=True),
+        T.Normalize(mean=stats["mean"], std=stats["std"]),
+        T.Resize(size=img_size, antialias=True),
+    ])
+
+    t0 = time.perf_counter()
+    with h5py.File(h5_path, "r", swmr=True) as f:
+        n_total = int(f["pixels"].shape[0])
+        py_log.info("Raw frames to encode: %d", n_total)
+        all_emb = None
+
+        for start in range(0, n_total, batch_size):
+            end = min(start + batch_size, n_total)
+            raw = f["pixels"][start:end]                        # (B, H, W, C) uint8
+            frames = torch.from_numpy(raw).permute(0, 3, 1, 2) # (B, C, H, W)
+            frames = transform(frames).unsqueeze(1).to(device)  # (B, 1, C, H, W)
+            with torch.no_grad():
+                emb = jepa.encode({"pixels": frames})["emb"][:, 0]  # (B, D)
+            if all_emb is None:
+                all_emb = np.zeros((n_total, emb.shape[-1]), dtype=np.float32)
+            all_emb[start:end] = emb.float().cpu().numpy()
+
+            if (start // batch_size) % 20 == 0 or end == n_total:
+                py_log.info(
+                    "  %.1f%%  (%d/%d)  %.1fs",
+                    100.0 * end / n_total, end, n_total, time.perf_counter() - t0,
+                )
+
+    tmp = out_path.with_suffix(f".{os.getpid()}.tmp.npy")
+    np.save(tmp, all_emb)
+    tmp.rename(out_path)
+    py_log.info("Embeddings saved to %s  (%.1fs)", out_path, time.perf_counter() - t0)
+    return np.load(out_path, mmap_mode="r")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
@@ -56,8 +129,36 @@ def run(cfg):
         cfg.data.dataset.num_steps = cfg.stage2_num_steps
 
     dataset = swm.data.HDF5Dataset(**cfg.data.dataset, transform=None)
-    transforms = [get_img_preprocessor(source="pixels", target="pixels", img_size=cfg.img_size)]
 
+    ##############################
+    ##       model / JEPA       ##
+    ##############################
+
+    py_log.info("STABLEWM_HOME set to %s", os.getenv("STABLEWM_HOME"))
+    py_log.info("Loading stage-1 checkpoint from %s", cfg.stage1_checkpoint)
+    jepa = torch.load(cfg.stage1_checkpoint, map_location=cfg.device, weights_only=False)
+    jepa.eval()
+
+    ##############################
+    ##   embedding cache        ##
+    ##############################
+
+    cache_dir = Path(cfg.get("cache_dir") or swm.data.utils.get_cache_dir())
+    ckpt_stem = Path(cfg.stage1_checkpoint).stem
+    emb_path = cache_dir / f"{cfg.data.dataset.name}_{ckpt_stem}_img{cfg.img_size}_emb.npy"
+    emb_array = _ensure_embeddings(
+        jepa, cache_dir / f"{cfg.data.dataset.name}.h5", emb_path,
+        cfg.img_size, cfg.device,
+    )
+    dataset._cache["emb"] = emb_array
+    dataset._keys = ["emb" if k == "pixels" else k for k in dataset._keys]
+
+    ##############################
+    ##     transforms           ##
+    ##############################
+
+    # Image preprocessing is skipped — embeddings are already encoded.
+    transforms = []
     with open_dict(cfg):
         for col in cfg.data.dataset.keys_to_load:
             if col.startswith("pixels"):
@@ -66,8 +167,7 @@ def run(cfg):
             transforms.append(normalizer)
             setattr(cfg.wm, f"{col}_dim", dataset.get_dim(col))
 
-    transform = spt.data.transforms.Compose(*transforms)
-    dataset.transform = transform
+    dataset.transform = spt.data.transforms.Compose(*transforms) if transforms else None
 
     rnd_gen = torch.Generator().manual_seed(cfg.seed)
     train_set, val_set = spt.data.random_split(
@@ -81,14 +181,8 @@ def run(cfg):
     )
 
     ##############################
-    ##       model              ##
+    ##     hierarchical model   ##
     ##############################
-
-    py_log.info("STABLEWM_HOME set to %s", os.getenv('STABLEWM_HOME'))
-
-    py_log.info("Loading stage-1 checkpoint from %s", cfg.stage1_checkpoint)
-    jepa = torch.load(cfg.stage1_checkpoint, map_location=cfg.device, weights_only=False)
-    jepa.eval()
 
     effective_act_dim = cfg.data.dataset.frameskip * cfg.wm.action_dim
 
@@ -153,6 +247,8 @@ def run(cfg):
         weight_decay=cfg.stage2.get("weight_decay", 0.01),
         select_by=cfg.stage2.get("select_by", "tf"),
         ar_every=cfg.stage2.get("ar_every", 5),
+        use_amp=cfg.stage2.get("use_amp", True),
+        compile_model=cfg.stage2.get("compile", False),
     )
 
     out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"

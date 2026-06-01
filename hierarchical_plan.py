@@ -72,6 +72,7 @@ def plan(
     inner_iters: int = 5,
     outer_std: float = 5.0,
     inner_std: float = 1.0,
+    warmstart: dict | None = None,
 ) -> torch.Tensor:
     """Two-level CEM-MPC. Returns the first primitive action to execute.
 
@@ -104,6 +105,11 @@ def plan(
     inner_std      : initial CEM std for the inner (primitive-action) loop. Must
                      roughly match the dataset action scale (StandardScaler-normalised
                      actions have std~1.0); too small starves the search of exploration.
+    warmstart      : mutable dict optionally carrying ``"mu_mac": (H_high, d_L)`` from
+                     the previous call. When present, the outer CEM is initialised from
+                     that tensor with halved std (near-solution warm-start). Updated
+                     in-place after each call so callers only need to pass the same dict
+                     every re-plan step.
 
     Returns
     -------
@@ -111,22 +117,37 @@ def plan(
     """
     device = z_init.device
     d_L = model.latent_action_dim
+    device_type = device.type if hasattr(device, "type") else str(device).split(":")[0]
+    amp_enabled = device_type == "cuda"
+
+    # Progressive weights: later subgoals matter more; normalised to sum = 1.
+    w_high = torch.linspace(1.0 / H_high, 1.0, H_high, device=device)
+    w_high = w_high / w_high.sum()                                        # (H,)
 
     # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
-    mu_mac = torch.zeros(H_high, d_L, device=device)
-    std_mac = torch.full((H_high, d_L), outer_std, device=device)
+    if warmstart is not None and "mu_mac" in warmstart:
+        mu_mac = warmstart["mu_mac"].to(device)
+        std_mac = torch.full((H_high, d_L), outer_std / 2, device=device)  # tighter
+    else:
+        mu_mac = torch.zeros(H_high, d_L, device=device)
+        std_mac = torch.full((H_high, d_L), outer_std, device=device)
 
     def outer_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, H_high, d_L)
-        subgoals = model._rollout_high(z_init, candidates)     # (S, H_high, D)
-        z_last = subgoals[:, -1]                               # (S, D)
-        return (z_last - z_goal.unsqueeze(0)).abs().sum(-1)    # (S,)
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
+            subgoals = model._rollout_high(z_init, candidates)             # (S, H_high, D)
+        dists = (subgoals - z_goal.unsqueeze(0).unsqueeze(1)).abs().sum(-1)  # (S, H)
+        return (dists * w_high.unsqueeze(0)).sum(-1)                       # (S,)
 
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
     # best_mac: (H_high, d_L)
 
+    if warmstart is not None:
+        warmstart["mu_mac"] = best_mac.cpu()
+
     # ── Derive first subgoal ──────────────────────────────────────────────────
-    z_sg = model._rollout_high(z_init, best_mac.unsqueeze(0))[:, 0].squeeze(0)  # (D,)
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
+        z_sg = model._rollout_high(z_init, best_mac.unsqueeze(0))[:, 0].squeeze(0)  # (D,)
 
     # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
@@ -134,8 +155,9 @@ def plan(
 
     def inner_cost(candidates: torch.Tensor) -> torch.Tensor:
         # candidates: (S, h_low, action_dim)
-        z_final = model._rollout_low(z_init, candidates)       # (S, D)
-        return (z_final - z_sg.unsqueeze(0)).abs().sum(-1)     # (S,)
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
+            z_final = model._rollout_low(z_init, candidates)               # (S, D)
+        return (z_final - z_sg.unsqueeze(0)).abs().sum(-1)                 # (S,)
 
     best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters)
     # best_act: (h_low, action_dim)

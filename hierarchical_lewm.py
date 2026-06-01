@@ -314,12 +314,16 @@ class HierarchicalLeWM(nn.Module):
         -------
         dict with 'loss' (scalar), 'high_pred_emb', 'high_target_emb'
         """
-        pixels = obs["pixels"]                              # (B, T, C, H, W)
         actions = torch.nan_to_num(obs["action"], 0.0)     # (B, T, action_dim)
 
-        grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
-        with grad_ctx:
-            emb = self.jepa.encode({"pixels": pixels})["emb"]  # (B, T, embed_dim)
+        if "emb" in obs:
+            # Fast path: pre-computed embeddings from the cache (no ViT forward pass).
+            emb = obs["emb"]                                # (B, T, embed_dim)
+        else:
+            pixels = obs["pixels"]                          # (B, T, C, H, W)
+            grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
+            with grad_ctx:
+                emb = self.jepa.encode({"pixels": pixels})["emb"]
 
         W = len(waypoint_idx)
         wp_emb = emb[:, waypoint_idx]      # (B, W, embed_dim)
@@ -465,6 +469,8 @@ def train_hierarchical_lewm(
     weight_decay: float = 0.01,
     select_by: str = "tf",
     ar_every: int = 5,
+    use_amp: bool = True,
+    compile_model: bool = False,
 ) -> HierarchicalLeWM:
     """Jointly optimise A_ψ and P^(2) on L_tf (stage 2).
 
@@ -505,6 +511,13 @@ def train_hierarchical_lewm(
                           convention as stage-1)
     """
     model = model.to(device)
+
+    if compile_model:
+        model.action_encoder_high = torch.compile(model.action_encoder_high)
+        model.high_predictor = torch.compile(model.high_predictor)
+
+    device_type = device.split(":")[0]   # "cuda", "cpu", or "mps"
+    amp_enabled = use_amp and device_type == "cuda"
 
     # only the two new modules are optimised in stage 2
     stage2_params = (
@@ -547,10 +560,11 @@ def train_hierarchical_lewm(
             T = batch["pixels"].shape[1]
             wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
 
-            out = model.forward_high(
-                batch, wp_idx, freeze_encoder=freeze_encoder,
-                teacher_forcing_prob=tf_prob,
-            )
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
+                out = model.forward_high(
+                    batch, wp_idx, freeze_encoder=freeze_encoder,
+                    teacher_forcing_prob=tf_prob,
+                )
 
             optimizer.zero_grad()
             out["loss"].backward()
@@ -608,7 +622,7 @@ def train_hierarchical_lewm(
             run_ar = ((epoch + 1) % max(1, ar_every) == 0) or (epoch + 1 == n_epochs)
             val_metrics = _validate_hierarchical(
                 model, val_dataloader, n_waypoints, freeze_encoder, device,
-                run_ar=run_ar,
+                run_ar=run_ar, device_type=device_type, amp_enabled=amp_enabled,
             )
             epoch_metrics.update(val_metrics)
             ar_str = (
@@ -691,6 +705,8 @@ def _validate_hierarchical(
     freeze_encoder: bool,
     device: str,
     run_ar: bool = True,
+    device_type: str = "cuda",
+    amp_enabled: bool = False,
 ) -> dict:
     """Held-out teacher-forced loss, plus an optional free-running (AR) loss.
 
@@ -718,9 +734,10 @@ def _validate_hierarchical(
         T = batch["pixels"].shape[1]
         wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
 
-        out = model.forward_high(
-            batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=1.0
-        )
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
+            out = model.forward_high(
+                batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=1.0
+            )
         val_loss += out["loss"].item()
         val_pred += out["loss_pred"].item()
         val_var  += out["loss_var"].item()
@@ -728,9 +745,10 @@ def _validate_hierarchical(
 
         if run_ar:
             # Free-running rollout: tf_prob=0.0 deterministically feeds back predictions.
-            out_ar = model.forward_high(
-                batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=0.0
-            )
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
+                out_ar = model.forward_high(
+                    batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=0.0
+                )
             ar_loss += out_ar["loss"].item()
             ar_pred += out_ar["loss_pred"].item()
 
