@@ -4,6 +4,7 @@
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -103,7 +104,12 @@ class DevTools:
         log.info("Logged in to %s as %s", registry, username)
 
     def push_docker(self, tag: str, username: str = None, owner: str = None, registry: str = "ghcr.io") -> None:
-        """Tag the local image and push it to the registry.
+        """Tag the local image and push it to the registry in OCI format.
+
+        Uses skopeo (if available) to push OCI-format layers, which are required
+        by Modal's umoci image builder. Falls back to docker push (Docker format)
+        with a warning when skopeo is not installed.
+
         username: your GitHub username for auth (GITHUB_USERNAME env var)
         owner:    GitHub username to push under (GHCR_IMAGE_OWNER env var) — defaults to username
         """
@@ -111,8 +117,23 @@ class DevTools:
         image_owner = owner or os.environ.get("GHCR_IMAGE_OWNER") or GHCR_IMAGE_OWNER
         image_name = IMAGE_NAME.split("/")[-1]
         remote = f"{registry}/{image_owner}/{image_name}:{tag}"
-        self._run(["docker", "tag", f"{IMAGE_NAME}:{tag}", remote])
-        self._run(["docker", "push", remote])
+        local = f"{IMAGE_NAME}:{tag}"
+
+        if shutil.which("skopeo"):
+            # skopeo reads credentials from ~/.docker/config.json (populated by docker login)
+            self._run([
+                "skopeo", "copy", "--format", "oci",
+                f"docker-daemon:{local}",
+                f"docker://{remote}",
+            ])
+        else:
+            log.warning(
+                "skopeo not found — pushing with docker push (Docker format). "
+                "Modal may reject the image. Install skopeo for OCI-format push."
+            )
+            self._run(["docker", "tag", local, remote])
+            self._run(["docker", "push", remote])
+
         log.info("Pushed: %s", remote)
 
     def pull_docker(self, tag: str, username: str = None, owner: str = None, registry: str = "ghcr.io") -> None:
@@ -150,7 +171,7 @@ class DevTools:
 
     def run_local(self, tag: str, data: str = "tworoom", setup: str = None, overrides: list = None) -> None:
         """Run training locally inside the Docker container."""
-        cmd = ["docker", "run"] + self._base_run_flags() + [f"{IMAGE_NAME}:{tag}", f"data={data}"]
+        cmd = ["docker", "run"] + self._base_run_flags() + [f"{IMAGE_NAME}:{tag}", "python", "train.py", f"data={data}"]
         if setup:
             cmd += [f"setup={setup}"]
         if overrides:
@@ -158,6 +179,182 @@ class DevTools:
                 overrides = overrides.strip("[]").split(",")
             cmd += overrides
         self._run(cmd)
+
+    def download_modal(self, *envs: str) -> None:
+        """Download datasets from HuggingFace directly into the Modal volume.
+
+        Much faster than uploading from local — Modal servers pull at datacenter speed.
+        Run once per dataset; reused across all training runs.
+
+        Examples:
+            ./devtools.py download_modal tworoom
+            ./devtools.py download_modal tworoom pusht
+        """
+        if not envs:
+            envs = ("tworoom",)
+        self._run([
+            "modal", "run", f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::download",
+            "--envs", ",".join(envs),
+        ])
+
+    def run_modal(self, tag: str, data: str = "tworoom", setup: str = "cloud_a10g",
+                  overrides: list = None, dry_run: bool = False) -> None:
+        """Submit a training job to Modal using the GHCR image.
+
+        Requires: pip install modal && modal setup
+        One-time volume/secret setup: see cloud/modal_train.py docstring.
+        """
+        overrides_str = ""
+        if overrides:
+            if isinstance(overrides, str):
+                overrides = overrides.strip("[]").split(",")
+            overrides_str = ",".join(overrides)
+
+        cmd = [
+            "modal", "run", "--detach", str(REPO_ROOT / "cloud" / "modal_train.py"),
+            "--data", data,
+            "--setup", setup,
+        ]
+        if overrides_str:
+            cmd += ["--overrides", overrides_str]
+        if dry_run:
+            cmd += ["--dry-run"]
+
+        # LEWM_TAG is read at module import time by modal_train.py
+        env = {**os.environ, "LEWM_TAG": tag}
+        log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
+
+    def run_hierarchical_local(self, tag: str, stage1_checkpoint: str,
+                               data: str = "tworoom", setup: str = None,
+                               overrides: list = None, dry_run: bool = False) -> None:
+        """Run stage-2 hierarchical training locally inside the Docker container.
+
+        stage1_checkpoint: path inside the container. If the checkpoint lives in
+                           STABLEWM_HOME it will be at /stablewm-home/<filename>.ckpt.
+                           Alternatively use /app/baseline/... for Git-tracked files.
+        """
+        override_list = []
+        if overrides:
+            if isinstance(overrides, str):
+                override_list = overrides.strip("[]").split(",")
+            else:
+                override_list = list(overrides)
+
+        if dry_run:
+            override_list += [
+                "stage2.n_epochs=2",
+                "loader.batch_size=8",
+                "wandb.enabled=False",
+            ]
+
+        cmd = [
+            "docker", "run",
+            "--entrypoint", "python",
+        ] + self._base_run_flags() + [
+            f"{IMAGE_NAME}:{tag}",
+            "train_hierarchical.py",
+            f"stage1_checkpoint={stage1_checkpoint}",
+            f"data={data}",
+        ]
+        if setup:
+            cmd += [f"setup={setup}"]
+        cmd += override_list
+        self._run(cmd)
+
+    def run_hierarchical_modal(self, tag: str, stage1_checkpoint: str,
+                               data: str = "tworoom", setup: str = "cloud_a100",
+                               overrides: list = None,
+                               dry_run: bool = False) -> None:
+        """Submit a stage-2 hierarchical training job to Modal (A100 GPU).
+
+        The stage-1 checkpoint must already be in the Modal volume.
+        Upload it first if needed:
+            modal volume put lewm-data <local>_object.ckpt <filename>_object.ckpt
+
+        stage1_checkpoint: absolute path inside /stablewm-home in the Modal volume.
+                           e.g. /stablewm-home/lewm_epoch_100_object.ckpt
+        setup:             Hydra setup config (default cloud_a100 — drives batch size
+                           and wandb entity/project to match the GPU)
+
+        Requires: pip install modal && modal setup
+        """
+        overrides_str = ""
+        if overrides:
+            if isinstance(overrides, str):
+                overrides = overrides.strip("[]").split(",")
+            overrides_str = ",".join(overrides)
+
+        cmd = [
+            "modal", "run", "--detach",
+            f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::train_hier",
+            "--stage1-checkpoint", stage1_checkpoint,
+            "--data", data,
+            "--setup", setup,
+        ]
+        if overrides_str:
+            cmd += ["--overrides", overrides_str]
+        if dry_run:
+            cmd += ["--dry-run"]
+
+        env = {**os.environ, "LEWM_TAG": tag}
+        log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
+
+    def eval_modal(self, tag: str, policy: str, config: str = "tworoom", overrides: list = None) -> None:
+        """Submit an eval job to Modal using the GHCR image (A10G GPU).
+
+        policy: path to checkpoint directory or stem inside /stablewm-home
+                e.g. /stablewm-home/lewm_epoch_9  or  /stablewm-home/<run_id>
+
+        Requires: pip install modal && modal setup
+        """
+        overrides_str = ""
+        if overrides:
+            if isinstance(overrides, str):
+                overrides = overrides.strip("[]").split(",")
+            overrides_str = ",".join(overrides)
+
+        cmd = [
+            "modal", "run", f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::eval",
+            "--policy", policy,
+            "--config", config,
+        ]
+        if overrides_str:
+            cmd += ["--overrides", overrides_str]
+
+        env = {**os.environ, "LEWM_TAG": tag}
+        log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
+
+    def eval_hierarchical_modal(self, tag: str, checkpoint: str, overrides: list = None) -> None:
+        """Submit a hierarchical planning eval job to Modal (A10G GPU).
+
+        checkpoint: absolute path inside /stablewm-home, e.g.
+            /stablewm-home/hwm_tworoom/<run_id>/<run_id>/hierarchical_lewm_best_object.ckpt
+
+        Results are written to hierarchical_results.txt next to the checkpoint.
+        Download with:
+            modal volume get lewm-data <run_id>/hierarchical_results.txt ./
+
+        Requires: pip install modal && modal setup
+        """
+        overrides_str = ""
+        if overrides:
+            if isinstance(overrides, str):
+                overrides = overrides.strip("[]").split(",")
+            overrides_str = ",".join(overrides)
+
+        cmd = [
+            "modal", "run", f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::eval_hier",
+            "--checkpoint", checkpoint,
+        ]
+        if overrides_str:
+            cmd += ["--overrides", overrides_str]
+
+        env = {**os.environ, "LEWM_TAG": tag}
+        log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
+        subprocess.run(cmd, check=True, env=env)
 
     def dev(self, tag: str) -> None:
         """Launch a bash shell with the local repo mounted at /app.

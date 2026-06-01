@@ -15,3 +15,7 @@ requirements_frozen*.txt
 # datasets — mounted at runtime, never baked into the image
 *.h5
 *.hdf5
+
+# large local artifacts
+baseline_paper/
+*.mp4

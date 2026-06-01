@@ -257,17 +257,137 @@ The image is pulled from `ghcr.io/<image-owner-username>/lewm:<tag>` and automat
 | `login` | Log in to GHCR using `GITHUB_PAT` and `GITHUB_USERNAME` env vars |
 | `push_docker <tag>` | Tag and push image to GHCR |
 | `pull_docker <tag>` | Pull image from GHCR and retag locally |
-| `run_local <tag> [--data] [--setup] [--overrides]` | Run training in baked image |
+| `run_local <tag> [--data] [--setup] [--overrides]` | Run stage-1 training in baked image |
+| `run_hierarchical_local <tag> --stage1-checkpoint <path> [--data] [--setup] [--overrides] [--dry-run]` | Run stage-2 hierarchical training in baked image |
+| `run_hierarchical_modal <tag> --stage1-checkpoint <path> [--data] [--overrides] [--dry-run]` | Submit stage-2 hierarchical training to Modal (A100) |
 | `dev <tag>` | Interactive shell with live repo mount |
 
 
-## 7. H-Leworld
+## 7. Hierarchical LeWM (stage 2)
 
+Stage-2 training freezes the stage-1 JEPA and jointly trains the `ActionEncoder` (A_ψ)
+and `HighLevelPredictor` (P^(2)) on a teacher-forcing waypoint loss.
 
-python train_hierarchical.py data=tworoom stage1_checkpoint=<path/to/lewm_object.ckpt> setup=cpu wandb.config.entity=florenciopaucar-uni stage2.n_epochs=1
+### Prerequisites
 
-python plan_hierarchical.py checkpoint=<path/to/hierarchical_lewm_object.ckpt> device=cpu \
-    eval.num_eval=5 plan.outer_samples=64 plan.inner_samples=32
+You need a stage-1 checkpoint (`lewm_epoch_N_object.ckpt`) from stage-1 training or the
+paper weights (see `convert_paper_weights.py`).
+
+---
+
+### Local (direct, no Docker) — quick smoke-test
+
+```bash
+# CPU smoke-test (2 epochs, tiny batch)
+python train_hierarchical.py \
+  data=tworoom \
+  stage1_checkpoint=<path/to/lewm_epoch_100_object.ckpt> \
+  setup=cpu \
+  stage2.n_epochs=2 \
+  loader.batch_size=8 \
+  wandb.enabled=False
+
+# GPU — full run
+python train_hierarchical.py \
+  data=tworoom \
+  stage1_checkpoint=<path/to/lewm_epoch_100_object.ckpt> \
+  stage2.n_epochs=50
+```
+
+The hierarchical model is saved to `$STABLEWM_HOME/<subdir>/hierarchical_lewm_object.ckpt`.
+
+---
+
+### Local (Docker container)
+
+The Docker image already contains `train_hierarchical.py`. Override the entrypoint at runtime:
+
+```bash
+# Dry-run (2 epochs, batch=8, no W&B)
+./devtools.py run_hierarchical_local <tag> \
+  --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
+  --dry-run
+
+# Full run
+./devtools.py run_hierarchical_local <tag> \
+  --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
+  --data tworoom
+
+# With extra Hydra overrides
+./devtools.py run_hierarchical_local <tag> \
+  --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
+  --overrides "[stage2.n_epochs=50,wandb.enabled=False]"
+```
+
+The checkpoint path is relative to the container. Files in `STABLEWM_HOME` are at
+`/stablewm-home/...`; Git-tracked files are at `/app/baseline/...`.
+
+---
+
+### Modal (A100 GPU)
+
+#### 1. Upload the stage-1 checkpoint to the Modal volume (if not already there)
+
+```bash
+modal volume put lewm-data \
+  <local_path>/lewm_epoch_100_object.ckpt \
+  lewm_epoch_100_object.ckpt
+```
+
+The file will be at `/stablewm-home/lewm_epoch_100_object.ckpt` inside the container.
+
+#### 2. Submit the job
+
+```bash
+# Dry-run (~5 min, 2 epochs, A100)
+./devtools.py run_hierarchical_modal <tag> \
+  --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
+  --dry-run
+
+# Full run
+./devtools.py run_hierarchical_modal <tag> \
+  --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
+  --data tworoom
+
+# Or directly via modal run
+LEWM_TAG=<tag> modal run cloud/modal_train.py::train_hier \
+  --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
+  --data tworoom \
+  --overrides "stage2.n_epochs=50,wandb.enabled=True"
+```
+
+The trained model is committed to the Modal volume at
+`/stablewm-home/<subdir>/hierarchical_lewm_object.ckpt`.
+
+#### 3. Download the hierarchical checkpoint
+
+```bash
+modal volume get lewm-data <subdir>/hierarchical_lewm_object.ckpt ./
+```
+
+---
+
+### Planning with the hierarchical model
+
+```bash
+python plan_hierarchical.py \
+  checkpoint=<path/to/hierarchical_lewm_object.ckpt> \
+  device=cpu \
+  eval.num_eval=5 \
+  plan.outer_samples=64 \
+  plan.inner_samples=32
+```
+
+---
+
+### Setup configs for stage-2
+
+| Setup | File | GPU | batch |
+|---|---|---|---|
+| _(none)_ | `hierarchical.yaml` defaults | any | 64 |
+| `setup=cloud_a10g` | `config/train/setup/cloud_a10g.yaml` | A10G (24 GB) | 192 |
+| `setup=cloud_a100` | `config/train/setup/cloud_a100.yaml` | A100 (40/80 GB) | 256 |
+| `setup=cpu` | `config/train/setup/cpu.yaml` | CPU | — |
 
 
 

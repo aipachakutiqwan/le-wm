@@ -31,8 +31,13 @@ import stable_worldmodel as swm
 import torch
 from omegaconf import OmegaConf, open_dict
 
+# DataLoader workers pass tensors via /dev/shm by default. Modal containers cap
+# /dev/shm small, so multi-worker loading with large batches blows it out with
+# "No space left on device". file_system strategy uses regular tmpfs/RAM instead.
+torch.multiprocessing.set_sharing_strategy("file_system")
+
 from hierarchical_lewm import HierarchicalLeWM, train_hierarchical_lewm
-from utils import get_column_normalizer, get_img_preprocessor
+from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
 
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
@@ -65,11 +70,14 @@ def run(cfg):
     dataset.transform = transform
 
     rnd_gen = torch.Generator().manual_seed(cfg.seed)
-    train_set, _ = spt.data.random_split(
+    train_set, val_set = spt.data.random_split(
         dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
     )
     dataloader = torch.utils.data.DataLoader(
         train_set, **cfg.loader, shuffle=True, drop_last=True, generator=rnd_gen
+    )
+    val_dataloader = torch.utils.data.DataLoader(
+        val_set, **cfg.loader, shuffle=False, drop_last=False
     )
 
     ##############################
@@ -91,6 +99,8 @@ def run(cfg):
         latent_action_dim=cfg.wm.latent_action_dim,
         n_waypoints=cfg.wm.n_waypoints,
         history_size=cfg.wm.history_size,
+        lambda_var=cfg.wm.lambda_var,
+        lambda_kl=cfg.wm.get("lambda_kl", 0.0),
         high_depth=cfg.wm.high_depth,
         high_heads=cfg.wm.high_heads,
         high_mlp_dim=cfg.wm.high_mlp_dim,
@@ -98,6 +108,7 @@ def run(cfg):
         action_enc_hidden=cfg.wm.action_enc_hidden,
         action_enc_depth=cfg.wm.action_enc_depth,
         action_enc_heads=cfg.wm.action_enc_heads,
+        dropout=cfg.stage2.get("dropout", 0.0),
     )
 
     ##########################
@@ -118,15 +129,30 @@ def run(cfg):
         wandb_run = wandb.init(**OmegaConf.to_container(cfg.wandb.config, resolve=True))
         wandb_run.config.update(OmegaConf.to_container(cfg, resolve=True))
 
+    object_dump_callback = ModelObjectCallBack(
+        dirpath=run_dir,
+        filename=cfg.output_model_name,
+        epoch_interval=cfg.stage2.get("ckpt_every_n_epochs", 1),
+    )
+
     model = train_hierarchical_lewm(
         model=model,
         dataloader=dataloader,
+        val_dataloader=val_dataloader,
         n_waypoints=cfg.wm.n_waypoints,
         lr=cfg.stage2.lr,
         n_epochs=cfg.stage2.n_epochs,
         device=device,
         freeze_encoder=cfg.stage2.freeze_encoder,
+        log_every_n_steps=cfg.stage2.log_every_n_steps,
         wandb_run=wandb_run,
+        ckpt_callback=object_dump_callback,
+        rollout_loss=cfg.stage2.get("rollout_loss", False),
+        ss_start=cfg.stage2.get("ss_start", 1.0),
+        ss_end=cfg.stage2.get("ss_end", 0.25),
+        weight_decay=cfg.stage2.get("weight_decay", 0.01),
+        select_by=cfg.stage2.get("select_by", "tf"),
+        ar_every=cfg.stage2.get("ar_every", 5),
     )
 
     out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"

@@ -1,0 +1,13 @@
+# @package _global_
+# Tuned for A100 (40/80 GB VRAM) — Modal A100
+
+loader:
+  batch_size: 256
+  num_workers: 12
+  prefetch_factor: 4
+
+wandb:
+  enabled: True
+  config:
+    entity: florenciopaucar-uni
+    project: lewm
