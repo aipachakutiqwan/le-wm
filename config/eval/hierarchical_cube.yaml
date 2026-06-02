@@ -4,15 +4,29 @@ defaults:
 # Path to stage-2 checkpoint (HierarchicalLeWM object saved by train_hierarchical.py).
 checkpoint: ???
 
-device: cpu  # override with device=cuda when a GPU is available
+device: cpu  # override with device=cuda:0 when a GPU is available
+
+# Second GPU for planning. When set, environments are split evenly between
+# device and extra_device and planned in parallel threads, ~halving wall-clock
+# planning time. Set to "cuda:1" on a two-A100 node.
+extra_device: null
+
+# Apply torch.compile to _rollout_high and _rollout_low before the eval loop.
+# Adds a ~2 min one-time warm-up; reduces per-call overhead by ~15-20% after.
+compile_planner: false
 
 seed: 42
+
+# Diagnostic: replace the planner with random actions to measure the "free" success
+# rate (episodes starting near the goal). If planning ≈ random, the planner is not
+# contributing and the bug is in the model/execution, not the search.
+random_policy: false
 
 world:
   env_name: swm/OGBCube-v0
   num_envs: ${eval.num_eval}
   max_episode_steps: ??? # set programmatically to 2 * eval_budget
-  history_size: 1
+  history_size: 3          # match stage-1 LeWM training context length
   frame_skip: 1            # policy handles frameskip internally via action queue
   env_type: single
   ob_type: states
@@ -29,24 +43,26 @@ dataset:
 
 # Two-level CEM hyperparameters (mirror defaults from hierarchical_plan.plan)
 plan:
-  H_high: 3
+  H_high: 1          # subgoal one macro from z_now; prevents H>=2 rollout drift
   h_low: 10
   outer_samples: 512
   inner_samples: 256
   outer_iters: 5
-  inner_iters: 5
+  inner_iters: 30    # the big lever; 5 rounds can't converge in ~100-D action space
+  outer_std: 5.0     # matches A_ψ's empirical macro-action spread (per-dim std up to ~2)
+  inner_std: 1.0     # matches StandardScaler-normalised action scale (~1.0)
 
-# MPC loop config — only used for the budget assertion in plan_hierarchical.py
+# MPC loop config fed to swm.PlanConfig
 plan_config:
-  horizon: 1
-  receding_horizon: 1
+  horizon: 1          # plan 1 high-level step per call (subgoal obtained internally)
+  receding_horizon: 1  # replan every primitive action
   history_len: 1
-  action_block: 1
+  action_block: 1     # 1 primitive action per plan call; frameskip handled by world.frame_skip
 
 eval:
   num_eval: 50
   goal_offset_steps: 25
-  eval_budget: 50          # primitive steps; matches cube flat eval for direct comparison
+  eval_budget: 50
   img_size: 224
   dataset_name: ogbench/cube_single_expert
   callables:
