@@ -240,6 +240,12 @@ class HierarchicalLeWMLit(pl.LightningModule):
     def on_validation_epoch_start(self) -> None:
         self._wp_idx_val = None
 
+    def on_train_epoch_end(self) -> None:
+        sched = self.lr_schedulers()
+        if sched is not None:
+            lr = sched.get_last_lr()[0]
+            self.log("train/lr", lr, on_epoch=True, prog_bar=False, sync_dist=False)
+
     # ── forward passes ─────────────────────────────────────────────────────────
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
@@ -263,6 +269,7 @@ class HierarchicalLeWMLit(pl.LightningModule):
 
         self.log("train/loss",         out["loss"],      on_step=True,  on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train/loss_pred",    out["loss_pred"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train/loss_var",     out["loss_var"],  on_step=False, on_epoch=True, sync_dist=True)
         self.log("train/loss_kl",      out["loss_kl"],   on_step=False, on_epoch=True, sync_dist=True)
         self.log("train/mac_absmean",  mac_absmean,      on_step=False, on_epoch=True, sync_dist=True)
         self.log("train/mac_std",      mac_std,          on_step=False, on_epoch=True, sync_dist=True)
@@ -322,7 +329,7 @@ class _BestObjectCallback(pl.Callback):
         self._best = float("inf")
 
     def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: HierarchicalLeWMLit) -> None:
-        if not trainer.is_global_zero:
+        if not trainer.is_global_zero or trainer.sanity_checking:
             return
         val_loss = trainer.callback_metrics.get("val/loss")
         if val_loss is None:
