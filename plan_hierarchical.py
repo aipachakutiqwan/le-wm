@@ -89,6 +89,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         extra_device: str | None = None,
         compile_planner: bool = False,
         log_every: int = 5,
+        eval_budget: int | None = None,
     ):
         super().__init__()
         if compile_planner:
@@ -101,6 +102,8 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self._action_queue: deque = deque()
         self._frameskip: int | None = None
         self._plan_step: int = 0
+        self._n_plan_total: int | None = None
+        self._eval_budget: int | None = eval_budget
         self._plan_stats: dict = {}
         self._log_every: int = log_every
         self._t_start: float = time.time()
@@ -120,6 +123,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self.env = env
         self._action_queue.clear()
         self._plan_step = 0
+        self._n_plan_total = None
         self._plan_stats = {}
         self._t_start = time.time()
 
@@ -237,11 +241,16 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         for t in range(1, fs):
             self._action_queue.append(prim[t])   # (E, base_dim)
 
+        # Compute total plan calls once frameskip is known.
+        if self._n_plan_total is None and self._eval_budget is not None:
+            self._n_plan_total = max(1, self._eval_budget // self._frameskip)
+
         if self._plan_step % self._log_every == 0:
             elapsed = time.time() - self._t_start
             st = self._plan_stats
             n_calls = st.get("n_calls", 1)
             avg_s = st.get("total_ms", 0.0) / n_calls / 1000.0
+            total_str = f"/{self._n_plan_total}" if self._n_plan_total is not None else ""
             dist_str = ""
             if "init_dist0" in st and "prev_dist" in st:
                 dist_str = (
@@ -249,8 +258,8 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                     f"→{float(st['prev_dist']):.3f}"
                 )
             py_log.info(
-                "plan_step %3d  elapsed %5.0fs  avg_plan %.1fs/call%s",
-                self._plan_step, elapsed, avg_s, dist_str,
+                "plan_step %3d%s  elapsed %5.0fs  avg_plan %.1fs/call%s",
+                self._plan_step, total_str, elapsed, avg_s, dist_str,
             )
 
         return prim[0]   # (E, base_dim)
@@ -350,6 +359,7 @@ def run(cfg: DictConfig):
             device=cfg.device,
             extra_device=cfg.get("extra_device", None),
             compile_planner=cfg.get("compile_planner", False),
+            eval_budget=cfg.eval.eval_budget,
         )
 
     ##########################
