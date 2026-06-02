@@ -15,6 +15,7 @@ python plan_hierarchical.py checkpoint=<path> device=cuda
 """
 
 import copy
+import gc
 import os
 import logging
 import threading
@@ -424,7 +425,9 @@ def run(cfg: DictConfig):
             video_path=results_path,
         )
     finally:
-        world.close()   # free EGL contexts before the display is terminated by GC
+        world.close()   # free EGL contexts
+        del world
+        gc.collect()    # destroy GL Python objects now, before EGL display terminates at shutdown
     elapsed = time.time() - t0
 
     py_log.info("metrics: %s", metrics)
