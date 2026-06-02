@@ -88,6 +88,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         device,
         extra_device: str | None = None,
         compile_planner: bool = False,
+        log_every: int = 5,
     ):
         super().__init__()
         if compile_planner:
@@ -101,6 +102,8 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self._frameskip: int | None = None
         self._plan_step: int = 0
         self._plan_stats: dict = {}
+        self._log_every: int = log_every
+        self._t_start: float = time.time()
 
         # Optional second GPU.
         self._extra_device: str | None = None
@@ -118,6 +121,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self._action_queue.clear()
         self._plan_step = 0
         self._plan_stats = {}
+        self._t_start = time.time()
 
     def _encode(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode pixel tensor to latent states.
@@ -232,6 +236,22 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         # queue steps 1..fs-1; return step 0 immediately
         for t in range(1, fs):
             self._action_queue.append(prim[t])   # (E, base_dim)
+
+        if self._plan_step % self._log_every == 0:
+            elapsed = time.time() - self._t_start
+            st = self._plan_stats
+            n_calls = st.get("n_calls", 1)
+            avg_s = st.get("total_ms", 0.0) / n_calls / 1000.0
+            dist_str = ""
+            if "init_dist0" in st and "prev_dist" in st:
+                dist_str = (
+                    f"  emb_dist {float(st['init_dist0']):.3f}"
+                    f"→{float(st['prev_dist']):.3f}"
+                )
+            py_log.info(
+                "plan_step %3d  elapsed %5.0fs  avg_plan %.1fs/call%s",
+                self._plan_step, elapsed, avg_s, dist_str,
+            )
 
         return prim[0]   # (E, base_dim)
 
@@ -373,16 +393,28 @@ def run(cfg: DictConfig):
     world.set_policy(policy)
     results_path = Path(cfg.checkpoint).parent
 
-    t0 = time.time()
-    metrics = world.evaluate_from_dataset(
-        dataset,
-        start_steps=eval_start_idx.tolist(),
-        goal_offset_steps=cfg.eval.goal_offset_steps,
-        eval_budget=cfg.eval.eval_budget,
-        episodes_idx=eval_episodes.tolist(),
-        callables=OmegaConf.to_container(cfg.eval.get("callables"), resolve=True),
-        video_path=results_path,
+    py_log.info(
+        "Evaluating %d episodes × %d-step budget  "
+        "[H=%d h=%d oi=%d ii=%d outer_std=%.1f inner_std=%.1f]",
+        cfg.eval.num_eval, cfg.eval.eval_budget,
+        cfg.plan.H_high, cfg.plan.h_low,
+        cfg.plan.outer_iters, cfg.plan.inner_iters,
+        cfg.plan.get("outer_std", 5.0), cfg.plan.get("inner_std", 1.0),
     )
+
+    t0 = time.time()
+    try:
+        metrics = world.evaluate_from_dataset(
+            dataset,
+            start_steps=eval_start_idx.tolist(),
+            goal_offset_steps=cfg.eval.goal_offset_steps,
+            eval_budget=cfg.eval.eval_budget,
+            episodes_idx=eval_episodes.tolist(),
+            callables=OmegaConf.to_container(cfg.eval.get("callables"), resolve=True),
+            video_path=results_path,
+        )
+    finally:
+        world.close()   # free EGL contexts before the display is terminated by GC
     elapsed = time.time() - t0
 
     py_log.info("metrics: %s", metrics)
