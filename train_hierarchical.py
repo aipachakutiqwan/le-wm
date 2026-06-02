@@ -65,17 +65,32 @@ def _ensure_embeddings(
     img_size: int,
     device: str,
     batch_size: int = 1024,
-) -> np.ndarray:
-    """Return cached embeddings, computing and saving them first if needed.
+    rank: int = 0,
+    world_size: int = 1,
+) -> None:
+    """Encode this rank's frame shard and write it to disk.
 
-    The cache file is keyed to both the dataset and the stage-1 checkpoint stem
-    so switching checkpoints never produces stale embeddings.
+    When world_size > 1 each rank encodes rows
+    [rank*n//world_size, (rank+1)*n//world_size) and writes a shard file.
+    The caller is responsible for the two dist.barrier() calls and the
+    rank-0 merge step.  When world_size == 1 this writes directly to
+    out_path (via a tmp-rename).  If out_path already exists (merged cache
+    from a previous run) the function returns immediately on all ranks.
     """
     if out_path.exists():
-        py_log.info("Reusing cached embeddings from %s", out_path)
-        return np.load(out_path, mmap_mode="r")
+        if rank == 0:
+            py_log.info("Reusing cached embeddings from %s", out_path)
+        return
 
-    py_log.info("Embedding cache not found — computing from %s …", h5_path)
+    if world_size == 1:
+        shard_path = out_path          # single rank: write straight to final path
+    else:
+        shard_path = out_path.with_name(f"{out_path.stem}.shard{rank}.npy")
+        if shard_path.exists():
+            py_log.info("[rank %d] Shard already on disk, skipping encode", rank)
+            return
+
+    py_log.info("[rank %d/%d] Encoding shard from %s …", rank, world_size, h5_path)
     jepa.to(device).eval()
     stats = spt.data.dataset_stats.ImageNet
     transform = T.Compose([
@@ -85,33 +100,39 @@ def _ensure_embeddings(
     ])
 
     t0 = time.perf_counter()
+    # h5py SWMR mode allows concurrent readers on the same file — safe for DDP.
     with h5py.File(h5_path, "r", swmr=True) as f:
         n_total = int(f["pixels"].shape[0])
-        py_log.info("Raw frames to encode: %d", n_total)
+        row_start = rank * n_total // world_size
+        row_end = (rank + 1) * n_total // world_size
+        n_shard = row_end - row_start
+        py_log.info("[rank %d] rows %d–%d (%d frames)", rank, row_start, row_end, n_shard)
         all_emb = None
 
-        for start in range(0, n_total, batch_size):
-            end = min(start + batch_size, n_total)
-            raw = f["pixels"][start:end]                        # (B, H, W, C) uint8
+        for s in range(row_start, row_end, batch_size):
+            e = min(s + batch_size, row_end)
+            raw = f["pixels"][s:e]                              # (B, H, W, C) uint8
             frames = torch.from_numpy(raw).permute(0, 3, 1, 2) # (B, C, H, W)
             frames = transform(frames).unsqueeze(1).to(device)  # (B, 1, C, H, W)
             with torch.no_grad():
                 emb = jepa.encode({"pixels": frames})["emb"][:, 0]  # (B, D)
             if all_emb is None:
-                all_emb = np.zeros((n_total, emb.shape[-1]), dtype=np.float32)
-            all_emb[start:end] = emb.float().cpu().numpy()
+                all_emb = np.zeros((n_shard, emb.shape[-1]), dtype=np.float32)
+            local_s = s - row_start
+            local_e = e - row_start
+            all_emb[local_s:local_e] = emb.float().cpu().numpy()
 
-            if (start // batch_size) % 20 == 0 or end == n_total:
+            if (local_s // batch_size) % 20 == 0 or e == row_end:
                 py_log.info(
-                    "  %.1f%%  (%d/%d)  %.1fs",
-                    100.0 * end / n_total, end, n_total, time.perf_counter() - t0,
+                    "[rank %d]  %.1f%%  (%d/%d)  %.1fs",
+                    rank, 100.0 * local_e / n_shard, local_e, n_shard,
+                    time.perf_counter() - t0,
                 )
 
-    tmp = out_path.with_suffix(f".{os.getpid()}.tmp.npy")
+    tmp = shard_path.with_suffix(f".{os.getpid()}.tmp.npy")
     np.save(tmp, all_emb)
-    tmp.rename(out_path)
-    py_log.info("Embeddings saved to %s  (%.1fs)", out_path, time.perf_counter() - t0)
-    return np.load(out_path, mmap_mode="r")
+    tmp.rename(shard_path)
+    py_log.info("[rank %d] Shard saved to %s  (%.1fs)", rank, shard_path, time.perf_counter() - t0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -168,15 +189,36 @@ def run(cfg):
     cache_dir = Path(cfg.get("cache_dir") or swm.data.utils.get_cache_dir())
     ckpt_stem = Path(cfg.stage1_checkpoint).stem
     emb_path = cache_dir / f"{cfg.data.dataset.name}_{ckpt_stem}_img{cfg.img_size}_emb.npy"
-    # Only rank 0 computes the cache; others wait at the barrier then load from disk.
-    if is_main:
-        _ensure_embeddings(
-            jepa, cache_dir / f"{cfg.data.dataset.name}.h5", emb_path,
-            cfg.img_size, device,
-            batch_size=cfg.get("cache_batch_size", 1024),
-        )
+
+    _rank = dist.get_rank() if is_distributed else 0
+    _world = dist.get_world_size() if is_distributed else 1
+
+    # All ranks encode their own shard in parallel (~2× faster on 2 A100s).
+    _ensure_embeddings(
+        jepa, cache_dir / f"{cfg.data.dataset.name}.h5", emb_path,
+        cfg.img_size, device,
+        batch_size=cfg.get("cache_batch_size", 1024),
+        rank=_rank,
+        world_size=_world,
+    )
+
     if is_distributed:
-        dist.barrier()
+        dist.barrier()  # wait for every rank's shard to land on disk
+        if is_main and not emb_path.exists():
+            shard_files = [
+                emb_path.with_name(f"{emb_path.stem}.shard{r}.npy")
+                for r in range(_world)
+            ]
+            py_log.info("Merging %d shards into %s", _world, emb_path)
+            merged = np.concatenate([np.load(p) for p in shard_files], axis=0)
+            tmp = emb_path.with_suffix(f".{os.getpid()}.tmp.npy")
+            np.save(tmp, merged)
+            tmp.rename(emb_path)
+            for p in shard_files:
+                p.unlink(missing_ok=True)
+            py_log.info("Merge complete — %d frames total", merged.shape[0])
+        dist.barrier()  # wait for rank-0 merge before everyone loads
+
     emb_array = np.load(emb_path, mmap_mode="r")
     dataset._cache["emb"] = emb_array
     dataset._keys = ["emb" if k == "pixels" else k for k in dataset._keys]
