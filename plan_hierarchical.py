@@ -37,7 +37,7 @@ from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 
 
-from hierarchical_plan import plan_batched, compile_for_planning
+from hierarchical_plan import plan, compile_for_planning
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -45,19 +45,14 @@ from hierarchical_plan import plan_batched, compile_for_planning
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _plan_chunked(model, z_init, z_goal, chunk_size, kwargs):
-    """Call plan_batched in env-sized chunks to bound peak VRAM per call."""
-    parts = []
-    for start in range(0, z_init.shape[0], chunk_size):
-        end = start + chunk_size
-        parts.append(plan_batched(model, z_init[start:end], z_goal[start:end], **kwargs))
-    return torch.cat(parts, dim=0)
-
-
-def _plan_worker(model, z_init, z_goal, chunk_size, kwargs, results, idx):
-    """Run _plan_chunked on one GPU slice; store result or exception in results[idx]."""
+def _plan_env_worker(model, z_init_slice, z_goal_slice, plan_kwargs, stats, results, idx):
+    """Run plan() sequentially over a slice of environments; store result or exception."""
     try:
-        results[idx] = _plan_chunked(model, z_init, z_goal, chunk_size, kwargs)
+        actions = []
+        for i in range(z_init_slice.shape[0]):
+            a = plan(model, z_init_slice[i], z_goal_slice[i], **plan_kwargs, stats=stats)
+            actions.append(a.cpu().numpy())
+        results[idx] = np.stack(actions)   # (slice_envs, action_dim)
     except Exception as e:
         results[idx] = e
 
@@ -103,7 +98,6 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         compile_planner: bool = False,
         log_every: int = 5,
         eval_budget: int | None = None,
-        env_chunk_size: int = 10,
     ):
         super().__init__()
         if compile_planner:
@@ -121,7 +115,6 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self._plan_stats: dict = {}
         self._log_every: int = log_every
         self._t_start: float = time.time()
-        self._env_chunk_size: int = env_chunk_size
 
         # Optional second GPU.
         self._extra_device: str | None = None
@@ -182,11 +175,12 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         n_envs = z_init.shape[0]
         self._plan_step += 1
 
-        # Track mean latent L1 distance across all envs before any splitting/chunking.
+        # Track mean latent L1 distance across all envs (keys distinct from plan()'s own
+        # per-env "init_dist0"/"prev_dist" keys, which would corrupt these mean values).
         dist_now = (z_goal - z_init).abs().sum(-1).mean().item()
-        if "init_dist0" not in self._plan_stats:
-            self._plan_stats["init_dist0"] = dist_now
-        self._plan_stats["prev_dist"] = dist_now
+        if "emb_init" not in self._plan_stats:
+            self._plan_stats["emb_init"] = dist_now
+        self._plan_stats["emb_prev"] = dist_now
 
         plan_kwargs = dict(
             H_high=self.plan_cfg.H_high,
@@ -201,32 +195,32 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         )
 
         if self._extra_model is not None and n_envs >= 2:
-            # Split environments between two GPUs and run concurrently.
-            # Each GPU processes its half in chunks of env_chunk_size to cap peak VRAM,
-            # preventing GPU saturation from killing MuJoCo's EGL contexts mid-evaluation.
+            # Split environments between two GPUs and run each half sequentially per-env.
+            # Sequential plan() keeps peak VRAM at 1 env × outer_samples, avoiding the
+            # GPU saturation that kills MuJoCo's EGL contexts with batched planning.
             # Thread 0 owns self._plan_stats to avoid races; thread 1 discards stats.
             split = n_envs // 2
             results = [None, None]
             threads = [
                 threading.Thread(
-                    target=_plan_worker,
+                    target=_plan_env_worker,
                     args=(
                         self.model,
                         z_init[:split].to(self.device),
                         z_goal[:split].to(self.device),
-                        self._env_chunk_size,
-                        {**plan_kwargs, "stats": self._plan_stats},
+                        plan_kwargs,
+                        self._plan_stats,
                         results, 0,
                     ),
                 ),
                 threading.Thread(
-                    target=_plan_worker,
+                    target=_plan_env_worker,
                     args=(
                         self._extra_model,
                         z_init[split:].to(self._extra_device),
                         z_goal[split:].to(self._extra_device),
-                        self._env_chunk_size,
-                        {**plan_kwargs, "stats": None},
+                        plan_kwargs,
+                        None,
                         results, 1,
                     ),
                 ),
@@ -238,13 +232,16 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             for i, r in enumerate(results):
                 if isinstance(r, Exception):
                     raise RuntimeError(f"GPU thread {i} failed") from r
-            eff = torch.cat([results[0].cpu(), results[1].cpu()], dim=0).numpy()
+            eff = np.concatenate([results[0], results[1]], axis=0)
         else:
-            eff = _plan_chunked(
-                self.model, z_init, z_goal,
-                self._env_chunk_size,
-                {**plan_kwargs, "stats": self._plan_stats},
-            ).cpu().numpy()
+            actions = []
+            for i in range(n_envs):
+                a = plan(
+                    self.model, z_init[i], z_goal[i],
+                    **plan_kwargs, stats=self._plan_stats,
+                )
+                actions.append(a.cpu().numpy())
+            eff = np.stack(actions)
 
         if "action" in self.process:
             scaler = self.process["action"]
@@ -280,10 +277,10 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             avg_s = st.get("total_ms", 0.0) / self._plan_step / 1000.0
             total_str = f"/{self._n_plan_total}" if self._n_plan_total is not None else ""
             dist_str = ""
-            if "init_dist0" in st and "prev_dist" in st:
+            if "emb_init" in st and "emb_prev" in st:
                 dist_str = (
-                    f"  emb_dist {float(st['init_dist0']):.3f}"
-                    f"→{float(st['prev_dist']):.3f}"
+                    f"  emb_dist {float(st['emb_init']):.3f}"
+                    f"→{float(st['emb_prev']):.3f}"
                 )
             py_log.info(
                 "plan_step %3d%s  elapsed %5.0fs  avg_plan %.1fs/call%s",
@@ -388,7 +385,6 @@ def run(cfg: DictConfig):
             extra_device=cfg.get("extra_device", None),
             compile_planner=cfg.get("compile_planner", False),
             eval_budget=cfg.eval.eval_budget,
-            env_chunk_size=cfg.get("env_chunk_size", 10),
         )
 
     ##########################
