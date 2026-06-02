@@ -31,8 +31,8 @@ cache_batch_size: 1024   # batch size for the one-time embedding cache pass; inc
 cache_extra_device: null
 
 loader:
-  batch_size: 512
-  num_workers: 12
+  batch_size: 1024   # per-GPU effective = batch_size / num_gpus; doubled for 2-GPU runs
+  num_workers: 8
   persistent_workers: True
   prefetch_factor: 4
   pin_memory: True

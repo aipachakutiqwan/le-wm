@@ -56,6 +56,33 @@ from utils import get_column_normalizer, ModelObjectCallBack
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Picklable HDF5Dataset
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class _PicklableHDF5Dataset(swm.data.HDF5Dataset):
+    """HDF5Dataset with proper pickle support for DataLoader multi-worker loading.
+
+    HDF5Dataset._open() stores an open h5py.File in self.h5_file.  Open file
+    handles cannot be pickled, which prevents DataLoader from spawning worker
+    processes.  __getstate__ closes and drops the handle before serialisation;
+    __setstate__ restores the rest of the instance so that _open() can reopen
+    the file lazily on the first __getitem__ call inside each worker.
+    """
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        if state.get("h5_file") is not None:
+            state["h5_file"].close()
+            state["h5_file"] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        # h5_file is None; _open() will reopen on next _load_slice call.
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Embedding cache
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -216,7 +243,7 @@ def _do_train(rank: int, world_size: int, cfg) -> None:
     with open_dict(cfg):
         cfg.data.dataset.num_steps = cfg.stage2_num_steps
 
-    dataset = swm.data.HDF5Dataset(**cfg.data.dataset, transform=None)
+    dataset = _PicklableHDF5Dataset(**cfg.data.dataset, transform=None)
 
     ##############################
     ##       model / JEPA       ##
@@ -289,14 +316,6 @@ def _do_train(rank: int, world_size: int, cfg) -> None:
     )
 
     loader_kwargs = OmegaConf.to_container(cfg.loader)
-    if is_distributed:
-        # mp.spawn workers use the 'spawn' start method, so DataLoader worker processes
-        # must pickle the dataset — but h5py file handles can't be pickled.
-        # num_workers=0 runs data loading in the main thread, avoiding the issue.
-        # Embeddings are already in RAM (numpy mmap), so this has minimal overhead.
-        loader_kwargs["num_workers"] = 0
-        loader_kwargs["persistent_workers"] = False
-        loader_kwargs.pop("prefetch_factor", None)  # only valid when num_workers > 0
 
     if is_distributed:
         train_sampler = DistributedSampler(train_set, shuffle=True, seed=cfg.seed)
