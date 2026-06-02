@@ -1,23 +1,23 @@
-"""Stage-2 training script for HierarchicalLeWM.
+"""Stage-2 training script for HierarchicalLeWM — PyTorch Lightning edition.
 
 Stage 1 (JEPA) is trained by train.py.  This script loads the resulting
 checkpoint, wraps it in HierarchicalLeWM, and runs the stage-2 teacher-
 forcing loop that jointly trains A_ψ and P^(2).
 
-On first run the frozen JEPA encoder is applied once to every raw frame in the
-HDF5 dataset and the result is saved to disk.  Subsequent runs reuse the cached
-file, so the ViT forward pass is never repeated during training.
+On first run the frozen JEPA encoder is applied once to every raw frame in
+the HDF5 dataset and the result is saved to disk.  Subsequent runs reuse the
+cached file, so the ViT forward pass is never repeated during training.
 
 Usage
 -----
 # Single GPU
 python train_hierarchical.py stage1_checkpoint=<path/to/weights.pt>
 
-# Two A100s (DDP) — torchrun handles rank/world-size env vars
-torchrun --nproc_per_node=2 train_hierarchical.py stage1_checkpoint=<path>
+# Two A100s — no torchrun needed
+python train_hierarchical.py stage1_checkpoint=<path> num_gpus=2
 
 # Different dataset
-python train_hierarchical.py data=pusht stage1_checkpoint=<path>
+python train_hierarchical.py data=ogb stage1_checkpoint=<path>
 
 # Quick smoke-test
 python train_hierarchical.py stage1_checkpoint=<path> \\
@@ -36,13 +36,12 @@ py_log = logging.getLogger(__name__)
 import h5py
 import hydra
 import numpy as np
-import wandb
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
+import lightning.pytorch as pl
+from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.strategies import DDPStrategy
 from omegaconf import OmegaConf, open_dict
 from torchvision.transforms import v2 as T
 
@@ -51,7 +50,8 @@ from torchvision.transforms import v2 as T
 # "No space left on device". file_system strategy uses regular tmpfs/RAM instead.
 torch.multiprocessing.set_sharing_strategy("file_system")
 
-from hierarchical_lewm import HierarchicalLeWM, train_hierarchical_lewm
+from hierarchical_lewm import HierarchicalLeWM
+from waypoint_sampler import sample_waypoints_fixed_stride
 from utils import get_column_normalizer, ModelObjectCallBack
 
 
@@ -136,66 +136,44 @@ def _ensure_embeddings(
     device: str,
     batch_size: int = 1024,
     extra_device: str | None = None,
-    rank: int = 0,
-    world_size: int = 1,
 ) -> None:
-    """Encode this rank's frame shard and write it to disk.
+    """Encode all frames and write the embedding cache to disk (single-process).
 
-    Single-process (world_size == 1):
-      - extra_device=None  → one GPU, sequential
-      - extra_device="cuda:1" → two threads on two GPUs, ~2× faster
+    extra_device=None  → one GPU, sequential.
+    extra_device="cuda:1" → two threads on two GPUs, ~2× faster.
 
-    DDP (world_size > 1, launched via torchrun):
-      - each rank independently encodes its shard; extra_device is ignored
-      - caller handles the two dist.barrier() + rank-0 merge
-
-    If out_path already exists (merged cache from a previous run) all ranks
-    return immediately.
+    If out_path already exists the function returns immediately.
     """
     if out_path.exists():
-        if rank == 0:
-            py_log.info("Reusing cached embeddings from %s", out_path)
+        py_log.info("Reusing cached embeddings from %s", out_path)
         return
-
-    if world_size == 1:
-        shard_path = out_path
-    else:
-        shard_path = out_path.with_name(f"{out_path.stem}.shard{rank}.npy")
-        if shard_path.exists():
-            py_log.info("[rank %d] Shard already on disk, skipping encode", rank)
-            return
 
     jepa.to(device).eval()
 
     with h5py.File(h5_path, "r") as f:
         n_total = int(f["pixels"].shape[0])
 
-    row_start = rank * n_total // world_size
-    row_end = (rank + 1) * n_total // world_size
-    n_shard = row_end - row_start
-
     py_log.info(
-        "[rank %d/%d] Encoding rows %d–%d (%d frames) on %s%s",
-        rank, world_size, row_start, row_end, n_shard, device,
-        f" + {extra_device}" if extra_device and world_size == 1 else "",
+        "Encoding %d frames on %s%s → %s",
+        n_total, device,
+        f" + {extra_device}" if extra_device else "",
+        out_path,
     )
-
     t0 = time.perf_counter()
 
-    if extra_device is not None and world_size == 1:
-        # Two-GPU threading: split the shard evenly between primary and extra device.
-        mid = (row_start + row_end) // 2
+    if extra_device is not None:
+        mid = n_total // 2
         jepa2 = copy.deepcopy(jepa).to(extra_device).eval()
         shards: list = [None, None]
         threads = [
             threading.Thread(
                 target=_encode_worker,
-                args=(jepa, h5_path, row_start, mid, batch_size, device, img_size, shards, 0),
+                args=(jepa, h5_path, 0, mid, batch_size, device, img_size, shards, 0),
                 daemon=True,
             ),
             threading.Thread(
                 target=_encode_worker,
-                args=(jepa2, h5_path, mid, row_end, batch_size, extra_device, img_size, shards, 1),
+                args=(jepa2, h5_path, mid, n_total, batch_size, extra_device, img_size, shards, 1),
                 daemon=True,
             ),
         ]
@@ -205,100 +183,209 @@ def _ensure_embeddings(
             t.join()
         all_emb = np.concatenate(shards, axis=0)
     else:
-        # Single-GPU path (DDP shard or explicit single-GPU run).
         out: list = [None]
-        _encode_worker(jepa, h5_path, row_start, row_end, batch_size, device, img_size, out, 0)
+        _encode_worker(jepa, h5_path, 0, n_total, batch_size, device, img_size, out, 0)
         all_emb = out[0]
 
-    tmp = shard_path.with_suffix(f".{os.getpid()}.tmp.npy")
+    tmp = out_path.with_suffix(f".{os.getpid()}.tmp.npy")
     np.save(tmp, all_emb)
-    tmp.rename(shard_path)
-    py_log.info(
-        "[rank %d] Embeddings saved to %s  (%.1fs)",
-        rank, shard_path, time.perf_counter() - t0,
-    )
+    tmp.rename(out_path)
+    py_log.info("Embeddings saved to %s  (%.1fs)", out_path, time.perf_counter() - t0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Training worker (called directly for 1 GPU, or via mp.spawn for N GPUs)
+# Lightning module
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _do_train(rank: int, world_size: int, cfg) -> None:
+class HierarchicalLeWMLit(pl.LightningModule):
+    """LightningModule wrapping HierarchicalLeWM for stage-2 training.
+
+    Lightning handles DDP, AMP (bf16-mixed), and the DataLoader DistributedSampler
+    automatically.  Only A_ψ and P^(2) are optimised; the JEPA encoder is frozen
+    before DDP wrapping so its parameters are excluded from all-reduce buckets.
+    """
+
+    def __init__(self, model: HierarchicalLeWM, cfg):
+        super().__init__()
+        self.model = model
+        self.cfg = cfg
+        self._wp_idx: torch.Tensor | None = None        # reset each train epoch
+        self._wp_idx_val: torch.Tensor | None = None    # reset each val epoch
+        self._tf_prob: float = 1.0
+
+        # Freeze JEPA before Lightning wraps in DDP so frozen params are
+        # excluded from all-reduce buckets from the start.
+        if cfg.stage2.freeze_encoder:
+            for p in self.model.jepa.parameters():
+                p.requires_grad_(False)
+
+        if cfg.stage2.get("compile", False):
+            self.model.action_encoder_high = torch.compile(self.model.action_encoder_high)
+            self.model.high_predictor = torch.compile(self.model.high_predictor)
+
+    # ── lifecycle hooks ────────────────────────────────────────────────────────
+
+    def on_train_epoch_start(self) -> None:
+        self._wp_idx = None   # recompute on first batch (T may change across datasets)
+        if self.cfg.stage2.get("rollout_loss", False):
+            n_epochs = self.cfg.stage2.n_epochs
+            frac = self.current_epoch / max(1, n_epochs - 1)
+            ss_start = self.cfg.stage2.get("ss_start", 1.0)
+            ss_end = self.cfg.stage2.get("ss_end", 0.25)
+            self._tf_prob = ss_start + (ss_end - ss_start) * frac
+        else:
+            self._tf_prob = 1.0
+
+    def on_validation_epoch_start(self) -> None:
+        self._wp_idx_val = None
+
+    # ── forward passes ─────────────────────────────────────────────────────────
+
+    def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
+        T = batch["action"].shape[1]
+        if self._wp_idx is None:
+            self._wp_idx = sample_waypoints_fixed_stride(
+                T, N=self.cfg.wm.n_waypoints, device="cpu"
+            )
+
+        # Lightning applies bf16 autocast when precision="bf16-mixed".
+        out = self.model(
+            batch, self._wp_idx,
+            freeze_encoder=self.cfg.stage2.freeze_encoder,
+            teacher_forcing_prob=self._tf_prob,
+        )
+
+        with torch.no_grad():
+            mac = out["macro_actions"]
+            mac_absmean = mac.mean(dim=(0, 1)).abs().mean()
+            mac_std = mac.std(dim=(0, 1)).mean()
+
+        self.log("train/loss",         out["loss"],      on_step=True,  on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train/loss_pred",    out["loss_pred"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train/loss_kl",      out["loss_kl"],   on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train/mac_absmean",  mac_absmean,      on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train/mac_std",      mac_std,          on_step=False, on_epoch=True, sync_dist=True)
+        self.log("train/tf_prob",      self._tf_prob,    on_step=False, on_epoch=False)
+        return out["loss"]
+
+    def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
+        T = batch["action"].shape[1]
+        if self._wp_idx_val is None:
+            self._wp_idx_val = sample_waypoints_fixed_stride(
+                T, N=self.cfg.wm.n_waypoints, device="cpu"
+            )
+
+        out = self.model.forward_high(
+            batch, self._wp_idx_val,
+            freeze_encoder=self.cfg.stage2.freeze_encoder,
+            teacher_forcing_prob=1.0,
+        )
+
+        self.log("val/loss",      out["loss"],      on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val/loss_pred", out["loss_pred"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("val/loss_kl",   out["loss_kl"],   on_step=False, on_epoch=True, sync_dist=True)
+        return out["loss"]
+
+    # ── optimiser ─────────────────────────────────────────────────────────────
+
+    def configure_optimizers(self):
+        stage2_params = (
+            list(self.model.action_encoder_high.parameters())
+            + list(self.model.high_predictor.parameters())
+        )
+        opt = torch.optim.AdamW(
+            stage2_params,
+            lr=self.cfg.stage2.lr,
+            weight_decay=self.cfg.stage2.get("weight_decay", 0.01),
+        )
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=self.cfg.stage2.n_epochs
+        )
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {"scheduler": sched, "interval": "epoch"},
+        }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Best-model callback
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class _BestObjectCallback(pl.Callback):
+    """Save raw HierarchicalLeWM to disk whenever val/loss improves."""
+
+    def __init__(self, dirpath: Path, filename: str):
+        self._dirpath = Path(dirpath)
+        self._filename = filename
+        self._best = float("inf")
+
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: HierarchicalLeWMLit) -> None:
+        if not trainer.is_global_zero:
+            return
+        val_loss = trainer.callback_metrics.get("val/loss")
+        if val_loss is None:
+            return
+        val_loss = float(val_loss)
+        if val_loss < self._best:
+            self._best = val_loss
+            path = self._dirpath / f"{self._filename}_best_object.ckpt"
+            torch.save(pl_module.model, path)
+            py_log.info("★ best val/loss=%.5f — saved %s", val_loss, path)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
+def run(cfg) -> None:
     t_run = time.perf_counter()
 
-    is_distributed = world_size > 1
-    is_main = rank == 0
-    device = f"cuda:{rank}" if is_distributed else cfg.device
-
     py_log.info(
-        "Hierarchical stage-2 training — data=%s checkpoint=%s  rank=%d/%d",
-        cfg.data.dataset.name, cfg.stage1_checkpoint, rank, world_size,
+        "Hierarchical stage-2 training — data=%s  checkpoint=%s",
+        cfg.data.dataset.name, cfg.stage1_checkpoint,
     )
-
-    #########################
-    ##       dataset       ##
-    #########################
+    py_log.info("STABLEWM_HOME set to %s", os.getenv("STABLEWM_HOME"))
 
     with open_dict(cfg):
         cfg.data.dataset.num_steps = cfg.stage2_num_steps
 
-    dataset = _PicklableHDF5Dataset(**cfg.data.dataset, transform=None)
+    ##########################
+    ##    embedding cache   ##
+    ##########################
+    # Run once in the main process before Lightning spawns DDP workers.
+    # extra_device enables a second thread on a second GPU for ~2× speed.
 
-    ##############################
-    ##       model / JEPA       ##
-    ##############################
-
-    py_log.info("STABLEWM_HOME set to %s", os.getenv("STABLEWM_HOME"))
     py_log.info("Loading stage-1 checkpoint from %s", cfg.stage1_checkpoint)
-    jepa = torch.load(cfg.stage1_checkpoint, map_location=device, weights_only=False)
+    jepa = torch.load(cfg.stage1_checkpoint, map_location=cfg.device, weights_only=False)
     jepa.eval()
-
-    ##############################
-    ##   embedding cache        ##
-    ##############################
 
     cache_dir = Path(cfg.get("cache_dir") or swm.data.utils.get_cache_dir())
     ckpt_stem = Path(cfg.stage1_checkpoint).stem
     emb_path = cache_dir / f"{cfg.data.dataset.name}_{ckpt_stem}_img{cfg.img_size}_emb.npy"
 
-    # Each rank encodes its own shard; in single-process mode cache_extra_device
-    # enables a second thread on a second GPU.
     _ensure_embeddings(
-        jepa, cache_dir / f"{cfg.data.dataset.name}.h5", emb_path,
-        cfg.img_size, device,
+        jepa,
+        cache_dir / f"{cfg.data.dataset.name}.h5",
+        emb_path,
+        cfg.img_size,
+        cfg.device,
         batch_size=cfg.get("cache_batch_size", 1024),
         extra_device=cfg.get("cache_extra_device", None),
-        rank=rank,
-        world_size=world_size,
     )
 
-    if is_distributed:
-        dist.barrier()  # wait for every rank's shard to land on disk
-        if is_main and not emb_path.exists():
-            shard_files = [
-                emb_path.with_name(f"{emb_path.stem}.shard{r}.npy")
-                for r in range(world_size)
-            ]
-            py_log.info("Merging %d shards into %s", world_size, emb_path)
-            merged = np.concatenate([np.load(p) for p in shard_files], axis=0)
-            tmp = emb_path.with_suffix(f".{os.getpid()}.tmp.npy")
-            np.save(tmp, merged)
-            tmp.rename(emb_path)
-            for p in shard_files:
-                p.unlink(missing_ok=True)
-            py_log.info("Merge complete — %d frames total", merged.shape[0])
-        dist.barrier()  # wait for rank-0 merge before everyone loads
+    ##########################
+    ##      dataset         ##
+    ##########################
 
+    dataset = _PicklableHDF5Dataset(**cfg.data.dataset, transform=None)
     emb_array = np.load(emb_path, mmap_mode="r")
     dataset._cache["emb"] = emb_array
     dataset._keys = ["emb" if k == "pixels" else k for k in dataset._keys]
 
-    ##############################
-    ##     transforms           ##
-    ##############################
-
-    # Image preprocessing is skipped — embeddings are already encoded.
     transforms = []
     with open_dict(cfg):
         for col in cfg.data.dataset.keys_to_load:
@@ -316,23 +403,17 @@ def _do_train(rank: int, world_size: int, cfg) -> None:
     )
 
     loader_kwargs = OmegaConf.to_container(cfg.loader)
-
-    if is_distributed:
-        train_sampler = DistributedSampler(train_set, shuffle=True, seed=cfg.seed)
-        dataloader = torch.utils.data.DataLoader(
-            train_set, **loader_kwargs, shuffle=False, drop_last=True, sampler=train_sampler
-        )
-    else:
-        dataloader = torch.utils.data.DataLoader(
-            train_set, **loader_kwargs, shuffle=True, drop_last=True, generator=rnd_gen
-        )
-    val_dataloader = torch.utils.data.DataLoader(
+    # shuffle=True here; Lightning replaces the sampler with DistributedSampler in DDP.
+    train_loader = torch.utils.data.DataLoader(
+        train_set, **loader_kwargs, shuffle=True, drop_last=True, generator=rnd_gen
+    )
+    val_loader = torch.utils.data.DataLoader(
         val_set, **loader_kwargs, shuffle=False, drop_last=False
     )
 
-    ##############################
-    ##     hierarchical model   ##
-    ##############################
+    ##########################
+    ##       model          ##
+    ##########################
 
     effective_act_dim = cfg.data.dataset.frameskip * cfg.wm.action_dim
 
@@ -354,113 +435,87 @@ def _do_train(rank: int, world_size: int, cfg) -> None:
         action_enc_heads=cfg.wm.action_enc_heads,
         dropout=cfg.stage2.get("dropout", 0.0),
     )
-    model = model.to(device)
-    if cfg.stage2.freeze_encoder:
-        # Freeze before DDP so the frozen params are excluded from all-reduce buckets.
-        # train_hierarchical_lewm repeats this call, but it becomes a no-op.
-        for p in model.jepa.parameters():
-            p.requires_grad_(False)
-    if is_distributed:
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+
+    lit = HierarchicalLeWMLit(model, cfg)
 
     ##########################
-    ##       training       ##
+    ##    run directory     ##
     ##########################
 
     run_dir = Path(swm.data.utils.get_cache_dir(), cfg.get("subdir") or "")
-    if is_main:
-        run_dir.mkdir(parents=True, exist_ok=True)
-        with open(run_dir / "config.yaml", "w") as f:
-            OmegaConf.save(cfg, f)
-    if is_distributed:
-        dist.barrier()  # ensure run_dir exists before non-main ranks proceed
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with open(run_dir / "config.yaml", "w") as f:
+        OmegaConf.save(cfg, f)
 
-    py_log.info("Run directory: %s  device: %s", run_dir, device)
+    ##########################
+    ##       logger         ##
+    ##########################
 
-    wandb_run = None
-    if is_main and cfg.wandb.enabled:
-        wandb_run = wandb.init(**OmegaConf.to_container(cfg.wandb.config, resolve=True))
-        wandb_run.config.update(OmegaConf.to_container(cfg, resolve=True))
+    logger: pl.loggers.Logger | bool = False
+    if cfg.wandb.enabled:
+        wandb_cfg = OmegaConf.to_container(cfg.wandb.config, resolve=True)
+        logger = WandbLogger(
+            entity=wandb_cfg.get("entity"),
+            project=wandb_cfg.get("project"),
+            name=wandb_cfg.get("name"),
+            id=wandb_cfg.get("id"),
+            resume=wandb_cfg.get("resume", "allow"),
+            config=OmegaConf.to_container(cfg, resolve=True),
+            save_dir=str(run_dir),
+        )
 
-    object_dump_callback = None
-    if is_main:
-        object_dump_callback = ModelObjectCallBack(
+    ##########################
+    ##      callbacks       ##
+    ##########################
+
+    callbacks = [
+        ModelObjectCallBack(
             dirpath=run_dir,
             filename=cfg.output_model_name,
             epoch_interval=cfg.stage2.get("ckpt_every_n_epochs", 1),
-        )
+        ),
+        _BestObjectCallback(dirpath=run_dir, filename=cfg.output_model_name),
+    ]
 
-    model = train_hierarchical_lewm(
-        model=model,
-        dataloader=dataloader,
-        val_dataloader=val_dataloader if is_main else None,
-        n_waypoints=cfg.wm.n_waypoints,
-        lr=cfg.stage2.lr,
-        n_epochs=cfg.stage2.n_epochs,
-        device=device,
-        freeze_encoder=cfg.stage2.freeze_encoder,
-        log_every_n_steps=cfg.stage2.log_every_n_steps,
-        wandb_run=wandb_run,
-        ckpt_callback=object_dump_callback,
-        rollout_loss=cfg.stage2.get("rollout_loss", False),
-        ss_start=cfg.stage2.get("ss_start", 1.0),
-        ss_end=cfg.stage2.get("ss_end", 0.25),
-        weight_decay=cfg.stage2.get("weight_decay", 0.01),
-        select_by=cfg.stage2.get("select_by", "tf"),
-        ar_every=cfg.stage2.get("ar_every", 5),
-        use_amp=cfg.stage2.get("use_amp", True),
-        compile_model=cfg.stage2.get("compile", False),
-    )
+    ##########################
+    ##       trainer        ##
+    ##########################
 
-    if is_main:
-        out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
-        raw = model.module if hasattr(model, "module") else model
-        torch.save(raw, out_path)
-        py_log.info("Saved hierarchical model to %s", out_path)
-
-    total_s = time.perf_counter() - t_run
-    py_log.info(
-        "run complete — total time: %.1f s (%.1f min)  [data+cache+train+save]",
-        total_s, total_s / 60,
-    )
-
-    if wandb_run is not None:
-        wandb_run.finish()
-
-
-def _ddp_worker(rank: int, world_size: int, cfg_dict: dict) -> None:
-    """mp.spawn entry point: initialise DDP then run training."""
-    torch.multiprocessing.set_sharing_strategy("file_system")
-    cfg = OmegaConf.create(cfg_dict)
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", str(cfg.get("ddp_port", 29500)))
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-    try:
-        _do_train(rank=rank, world_size=world_size, cfg=cfg)
-    finally:
-        dist.destroy_process_group()
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-@hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
-def run(cfg) -> None:
     num_gpus = cfg.get("num_gpus", 1)
-    if num_gpus > 1:
-        # Spawn one process per GPU — no torchrun needed.
-        cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-        torch.multiprocessing.spawn(
-            _ddp_worker,
-            args=(num_gpus, cfg_dict),
-            nprocs=num_gpus,
-            join=True,
+    strategy: str | DDPStrategy = (
+        DDPStrategy(find_unused_parameters=True) if num_gpus > 1 else "auto"
+    )
+    accelerator = "gpu" if cfg.device.startswith("cuda") else cfg.device
+
+    trainer = pl.Trainer(
+        devices=num_gpus,
+        accelerator=accelerator,
+        strategy=strategy,
+        precision="bf16-mixed" if cfg.stage2.get("use_amp", True) else "32-true",
+        max_epochs=cfg.stage2.n_epochs,
+        logger=logger,
+        callbacks=callbacks,
+        log_every_n_steps=cfg.stage2.log_every_n_steps,
+        default_root_dir=str(run_dir),
+        enable_progress_bar=True,
+    )
+
+    trainer.fit(lit, train_loader, val_loader)
+
+    ##########################
+    ##      save final      ##
+    ##########################
+
+    if trainer.is_global_zero:
+        out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
+        torch.save(model, out_path)
+        py_log.info("Saved final model to %s", out_path)
+
+        total_s = time.perf_counter() - t_run
+        py_log.info(
+            "run complete — total time: %.1f s (%.1f min)",
+            total_s, total_s / 60,
         )
-    else:
-        _do_train(rank=0, world_size=1, cfg=cfg)
 
 
 if __name__ == "__main__":

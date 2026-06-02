@@ -19,9 +19,9 @@ train_split: 0.9
 
 device: cuda
 
-# Number of GPUs to use. Set to 2 to spawn two DDP workers via mp.spawn (no torchrun needed).
-# With num_gpus=2 the embedding cache is also split: rank 0 encodes the first half on cuda:0,
-# rank 1 encodes the second half on cuda:1 — cache_extra_device is then ignored.
+# Number of GPUs to use. Set to 2 for two-GPU DDP via Lightning (no torchrun needed).
+# Lightning replaces the DataLoader sampler with DistributedSampler automatically.
+# The embedding cache is always built in the main process; use cache_extra_device for speed.
 num_gpus: 1
 ddp_port: 29500   # NCCL rendezvous port; change if 29500 is already in use
 
