@@ -281,6 +281,16 @@ class HierarchicalLeWM(nn.Module):
         self.jepa.eval()
         return self
 
+    def forward(
+        self,
+        obs: dict,
+        waypoint_idx: torch.Tensor,
+        freeze_encoder: bool = True,
+        teacher_forcing_prob: float = 1.0,
+    ) -> dict:
+        """Route through forward_high so DDP.forward() fires and gradient all-reduce is set up."""
+        return self.forward_high(obs, waypoint_idx, freeze_encoder, teacher_forcing_prob)
+
     # ── Stage-1 forward ──────────────────────────────────────────────────────
 
     def forward_low(self, obs: dict) -> dict:
@@ -335,12 +345,11 @@ class HierarchicalLeWM(nn.Module):
 
         # A_ψ: encode each inter-waypoint action chunk → one macro-action
         n_seg = W - 1
+        boundaries = waypoint_idx.tolist()   # one transfer; avoids per-element CUDA syncs
         macro_list = []
         for k in range(n_seg):
-            s = int(waypoint_idx[k])
-            e = int(waypoint_idx[k + 1])
-            chunk = actions[:, s:e]                              # (B, chunk_len, A)
-            macro_list.append(self.action_encoder_high(chunk))  # (B, d_L)
+            chunk = actions[:, boundaries[k] : boundaries[k + 1]]   # (B, chunk_len, A)
+            macro_list.append(self.action_encoder_high(chunk))       # (B, d_L)
 
         macro_actions = torch.stack(macro_list, dim=1)   # (B, n_seg, d_L)
 
@@ -516,24 +525,27 @@ def train_hierarchical_lewm(
                           convention as stage-1)
     """
     model = model.to(device)
+    # Unwrap DistributedDataParallel so we can access sub-modules directly for
+    # compile, optimizer param collection, and encoder freezing.
+    raw_model = model.module if hasattr(model, "module") else model
 
     if compile_model:
-        model.action_encoder_high = torch.compile(model.action_encoder_high)
-        model.high_predictor = torch.compile(model.high_predictor)
+        raw_model.action_encoder_high = torch.compile(raw_model.action_encoder_high)
+        raw_model.high_predictor = torch.compile(raw_model.high_predictor)
 
     device_type = device.split(":")[0]   # "cuda", "cpu", or "mps"
     amp_enabled = use_amp and device_type == "cuda"
 
     # only the two new modules are optimised in stage 2
     stage2_params = (
-        list(model.action_encoder_high.parameters())
-        + list(model.high_predictor.parameters())
+        list(raw_model.action_encoder_high.parameters())
+        + list(raw_model.high_predictor.parameters())
     )
     optimizer = torch.optim.AdamW(stage2_params, lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
 
     if freeze_encoder:
-        for p in model.jepa.parameters():
+        for p in raw_model.jepa.parameters():
             p.requires_grad_(False)
 
     model.train()
@@ -553,6 +565,9 @@ def train_hierarchical_lewm(
     )
 
     for epoch in range(n_epochs):
+        if hasattr(dataloader.sampler, "set_epoch"):
+            dataloader.sampler.set_epoch(epoch)
+
         if rollout_loss:
             frac = epoch / max(1, n_epochs - 1)
             tf_prob = ss_start + (ss_end - ss_start) * frac
@@ -564,6 +579,10 @@ def train_hierarchical_lewm(
         epoch_step_ms = 0.0
         t_epoch = time.perf_counter()
 
+        # wp_idx is the same for every batch (T is fixed by stage2_num_steps).
+        # Compute on CPU once per epoch to avoid repeated CUDA allocations.
+        _wp_idx_cache: torch.Tensor | None = None
+
         for batch in dataloader:
             t_step = time.perf_counter()
             batch = {
@@ -572,10 +591,12 @@ def train_hierarchical_lewm(
             }
             # Use action length for T — works with both pixel and embedding-cache batches.
             T = batch["action"].shape[1]
-            wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
+            if _wp_idx_cache is None:
+                _wp_idx_cache = sample_waypoints_fixed_stride(T, N=n_waypoints, device="cpu")
+            wp_idx = _wp_idx_cache
 
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
-                out = model.forward_high(
+                out = model(
                     batch, wp_idx, freeze_encoder=freeze_encoder,
                     teacher_forcing_prob=tf_prob,
                 )
@@ -669,7 +690,7 @@ def train_hierarchical_lewm(
                 best_val_loss = val_metrics[sel_key]
                 best_epoch = epoch + 1
                 best_metrics = dict(val_metrics)
-                best_ckpt_path = ckpt_callback.save_best(model)
+                best_ckpt_path = ckpt_callback.save_best(raw_model)
                 val_str += "  ★ best"
 
         py_log.info(
@@ -685,7 +706,7 @@ def train_hierarchical_lewm(
             wandb_run.log(epoch_metrics, step=global_step)
 
         if ckpt_callback is not None:
-            ckpt_callback.save_epoch(model, epoch + 1)
+            ckpt_callback.save_epoch(raw_model, epoch + 1)
 
     if wandb_run is not None and best_ckpt_path is not None:
         import wandb
@@ -759,13 +780,16 @@ def _validate_hierarchical(
     val_loss = val_pred = val_var = val_kl = 0.0
     ar_loss = ar_pred = 0.0
     t_val_start = time.perf_counter()
+    _wp_idx_val: torch.Tensor | None = None
     for batch in val_dataloader:
         batch = {
             k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v
             for k, v in batch.items()
         }
         T = batch["action"].shape[1]
-        wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
+        if _wp_idx_val is None:
+            _wp_idx_val = sample_waypoints_fixed_stride(T, N=n_waypoints, device="cpu")
+        wp_idx = _wp_idx_val
 
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
             out = model.forward_high(

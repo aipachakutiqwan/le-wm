@@ -4,7 +4,16 @@ defaults:
 # Path to stage-2 checkpoint (HierarchicalLeWM object saved by train_hierarchical.py).
 checkpoint: ???
 
-device: cpu  # override with device=cuda when a GPU is available
+device: cpu  # override with device=cuda:0 when a GPU is available
+
+# Second GPU for planning. When set, environments are split evenly between
+# device and extra_device and planned in parallel threads, ~halving wall-clock
+# planning time. Set to "cuda:1" on a two-A100 node.
+extra_device: null
+
+# Apply torch.compile to _rollout_high and _rollout_low before the eval loop.
+# Adds a ~2 min one-time warm-up; reduces per-call overhead by ~15-20% after.
+compile_planner: false
 
 seed: 42
 

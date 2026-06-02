@@ -10,8 +10,11 @@ file, so the ViT forward pass is never repeated during training.
 
 Usage
 -----
-# TwoRoom (default data)
+# Single GPU
 python train_hierarchical.py stage1_checkpoint=<path/to/weights.pt>
+
+# Two A100s (DDP) — torchrun handles rank/world-size env vars
+torchrun --nproc_per_node=2 train_hierarchical.py stage1_checkpoint=<path>
 
 # Different dataset
 python train_hierarchical.py data=pusht stage1_checkpoint=<path>
@@ -35,6 +38,9 @@ import wandb
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from omegaconf import OmegaConf, open_dict
 from torchvision.transforms import v2 as T
 
@@ -116,10 +122,25 @@ def _ensure_embeddings(
 @hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
 def run(cfg):
     t_run = time.perf_counter()
+
+    # ── Distributed setup ─────────────────────────────────────────────────────
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    is_distributed = local_rank >= 0
+    if is_distributed:
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        device = f"cuda:{local_rank}"
+    else:
+        device = cfg.device
+    is_main = not is_distributed or dist.get_rank() == 0
+    # ──────────────────────────────────────────────────────────────────────────
+
     py_log.info(
-        "Hierarchical stage-2 training — data=%s checkpoint=%s",
+        "Hierarchical stage-2 training — data=%s checkpoint=%s  rank=%s/%s",
         cfg.data.dataset.name,
         cfg.stage1_checkpoint,
+        dist.get_rank() if is_distributed else 0,
+        dist.get_world_size() if is_distributed else 1,
     )
 
     #########################
@@ -137,7 +158,7 @@ def run(cfg):
 
     py_log.info("STABLEWM_HOME set to %s", os.getenv("STABLEWM_HOME"))
     py_log.info("Loading stage-1 checkpoint from %s", cfg.stage1_checkpoint)
-    jepa = torch.load(cfg.stage1_checkpoint, map_location=cfg.device, weights_only=False)
+    jepa = torch.load(cfg.stage1_checkpoint, map_location=device, weights_only=False)
     jepa.eval()
 
     ##############################
@@ -147,11 +168,16 @@ def run(cfg):
     cache_dir = Path(cfg.get("cache_dir") or swm.data.utils.get_cache_dir())
     ckpt_stem = Path(cfg.stage1_checkpoint).stem
     emb_path = cache_dir / f"{cfg.data.dataset.name}_{ckpt_stem}_img{cfg.img_size}_emb.npy"
-    emb_array = _ensure_embeddings(
-        jepa, cache_dir / f"{cfg.data.dataset.name}.h5", emb_path,
-        cfg.img_size, cfg.device,
-        batch_size=cfg.get("cache_batch_size", 1024),
-    )
+    # Only rank 0 computes the cache; others wait at the barrier then load from disk.
+    if is_main:
+        _ensure_embeddings(
+            jepa, cache_dir / f"{cfg.data.dataset.name}.h5", emb_path,
+            cfg.img_size, device,
+            batch_size=cfg.get("cache_batch_size", 1024),
+        )
+    if is_distributed:
+        dist.barrier()
+    emb_array = np.load(emb_path, mmap_mode="r")
     dataset._cache["emb"] = emb_array
     dataset._keys = ["emb" if k == "pixels" else k for k in dataset._keys]
 
@@ -175,9 +201,15 @@ def run(cfg):
     train_set, val_set = spt.data.random_split(
         dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
     )
-    dataloader = torch.utils.data.DataLoader(
-        train_set, **cfg.loader, shuffle=True, drop_last=True, generator=rnd_gen
-    )
+    if is_distributed:
+        train_sampler = DistributedSampler(train_set, shuffle=True, seed=cfg.seed)
+        dataloader = torch.utils.data.DataLoader(
+            train_set, **cfg.loader, shuffle=False, drop_last=True, sampler=train_sampler
+        )
+    else:
+        dataloader = torch.utils.data.DataLoader(
+            train_set, **cfg.loader, shuffle=True, drop_last=True, generator=rnd_gen
+        )
     val_dataloader = torch.utils.data.DataLoader(
         val_set, **cfg.loader, shuffle=False, drop_last=False
     )
@@ -206,35 +238,41 @@ def run(cfg):
         action_enc_heads=cfg.wm.action_enc_heads,
         dropout=cfg.stage2.get("dropout", 0.0),
     )
+    model = model.to(device)
+    if is_distributed:
+        model = DDP(model, device_ids=[local_rank])
 
     ##########################
     ##       training       ##
     ##########################
 
     run_dir = Path(swm.data.utils.get_cache_dir(), cfg.get("subdir") or "")
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if is_main:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with open(run_dir / "config.yaml", "w") as f:
+            OmegaConf.save(cfg, f)
+    if is_distributed:
+        dist.barrier()  # ensure run_dir exists before non-main ranks proceed
 
-    with open(run_dir / "config.yaml", "w") as f:
-        OmegaConf.save(cfg, f)
-
-    device = cfg.device
     py_log.info("Run directory: %s  device: %s", run_dir, device)
 
     wandb_run = None
-    if cfg.wandb.enabled:
+    if is_main and cfg.wandb.enabled:
         wandb_run = wandb.init(**OmegaConf.to_container(cfg.wandb.config, resolve=True))
         wandb_run.config.update(OmegaConf.to_container(cfg, resolve=True))
 
-    object_dump_callback = ModelObjectCallBack(
-        dirpath=run_dir,
-        filename=cfg.output_model_name,
-        epoch_interval=cfg.stage2.get("ckpt_every_n_epochs", 1),
-    )
+    object_dump_callback = None
+    if is_main:
+        object_dump_callback = ModelObjectCallBack(
+            dirpath=run_dir,
+            filename=cfg.output_model_name,
+            epoch_interval=cfg.stage2.get("ckpt_every_n_epochs", 1),
+        )
 
     model = train_hierarchical_lewm(
         model=model,
         dataloader=dataloader,
-        val_dataloader=val_dataloader,
+        val_dataloader=val_dataloader if is_main else None,
         n_waypoints=cfg.wm.n_waypoints,
         lr=cfg.stage2.lr,
         n_epochs=cfg.stage2.n_epochs,
@@ -253,9 +291,11 @@ def run(cfg):
         compile_model=cfg.stage2.get("compile", False),
     )
 
-    out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
-    torch.save(model, out_path)
-    py_log.info("Saved hierarchical model to %s", out_path)
+    if is_main:
+        out_path = run_dir / f"{cfg.output_model_name}_object.ckpt"
+        raw = model.module if hasattr(model, "module") else model
+        torch.save(raw, out_path)
+        py_log.info("Saved hierarchical model to %s", out_path)
 
     total_s = time.perf_counter() - t_run
     py_log.info(
