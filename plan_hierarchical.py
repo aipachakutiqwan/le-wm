@@ -46,8 +46,11 @@ from hierarchical_plan import plan, plan_batched, compile_for_planning
 
 
 def _plan_worker(model, z_init, z_goal, kwargs, results, idx):
-    """Run plan_batched on one GPU slice; store result in results[idx]."""
-    results[idx] = plan_batched(model, z_init, z_goal, **kwargs)
+    """Run plan_batched on one GPU slice; store result or exception in results[idx]."""
+    try:
+        results[idx] = plan_batched(model, z_init, z_goal, **kwargs)
+    except Exception as e:
+        results[idx] = e
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -211,6 +214,9 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                 t.start()
             for t in threads:
                 t.join()
+            for i, r in enumerate(results):
+                if isinstance(r, Exception):
+                    raise RuntimeError(f"GPU thread {i} failed") from r
             eff = torch.cat([results[0].cpu(), results[1].cpu()], dim=0).numpy()
         else:
             eff = plan_batched(
