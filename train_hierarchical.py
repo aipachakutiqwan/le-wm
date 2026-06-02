@@ -58,7 +58,7 @@ def _ensure_embeddings(
     out_path: Path,
     img_size: int,
     device: str,
-    batch_size: int = 512,
+    batch_size: int = 1024,
 ) -> np.ndarray:
     """Return cached embeddings, computing and saving them first if needed.
 
@@ -150,6 +150,7 @@ def run(cfg):
     emb_array = _ensure_embeddings(
         jepa, cache_dir / f"{cfg.data.dataset.name}.h5", emb_path,
         cfg.img_size, cfg.device,
+        batch_size=cfg.get("cache_batch_size", 1024),
     )
     dataset._cache["emb"] = emb_array
     dataset._keys = ["emb" if k == "pixels" else k for k in dataset._keys]

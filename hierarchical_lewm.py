@@ -358,7 +358,7 @@ class HierarchicalLeWM(nn.Module):
                 preds.append(pred_next)                       # predict z_{k+1}
                 if k < n_seg - 1:
                     use_true = (
-                        torch.rand(pixels.shape[0], 1, 1, device=hist.device)
+                        torch.rand(emb.shape[0], 1, 1, device=hist.device)
                         < teacher_forcing_prob
                     )
                     next_in = torch.where(use_true, wp_emb[:, k + 1:k + 2], pred_next)
