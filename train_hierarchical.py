@@ -287,17 +287,28 @@ def _do_train(rank: int, world_size: int, cfg) -> None:
     train_set, val_set = spt.data.random_split(
         dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
     )
+
+    loader_kwargs = OmegaConf.to_container(cfg.loader)
+    if is_distributed:
+        # mp.spawn workers use the 'spawn' start method, so DataLoader worker processes
+        # must pickle the dataset — but h5py file handles can't be pickled.
+        # num_workers=0 runs data loading in the main thread, avoiding the issue.
+        # Embeddings are already in RAM (numpy mmap), so this has minimal overhead.
+        loader_kwargs["num_workers"] = 0
+        loader_kwargs["persistent_workers"] = False
+        loader_kwargs.pop("prefetch_factor", None)  # only valid when num_workers > 0
+
     if is_distributed:
         train_sampler = DistributedSampler(train_set, shuffle=True, seed=cfg.seed)
         dataloader = torch.utils.data.DataLoader(
-            train_set, **cfg.loader, shuffle=False, drop_last=True, sampler=train_sampler
+            train_set, **loader_kwargs, shuffle=False, drop_last=True, sampler=train_sampler
         )
     else:
         dataloader = torch.utils.data.DataLoader(
-            train_set, **cfg.loader, shuffle=True, drop_last=True, generator=rnd_gen
+            train_set, **loader_kwargs, shuffle=True, drop_last=True, generator=rnd_gen
         )
     val_dataloader = torch.utils.data.DataLoader(
-        val_set, **cfg.loader, shuffle=False, drop_last=False
+        val_set, **loader_kwargs, shuffle=False, drop_last=False
     )
 
     ##############################
