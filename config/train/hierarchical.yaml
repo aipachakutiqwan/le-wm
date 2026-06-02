@@ -20,6 +20,10 @@ train_split: 0.9
 device: cuda
 
 cache_batch_size: 1024   # batch size for the one-time embedding cache pass; increase to saturate VRAM
+# Second GPU for the one-time embedding cache build. Set to "cuda:1" on a two-A100 node to
+# split the ViT forward pass across both GPUs via threading (~2× faster). Ignored in DDP mode
+# (torchrun), where each rank already encodes its own shard on its own GPU.
+cache_extra_device: null
 
 loader:
   batch_size: 512

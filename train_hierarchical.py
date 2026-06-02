@@ -24,8 +24,10 @@ python train_hierarchical.py stage1_checkpoint=<path> \\
     stage2.n_epochs=2 loader.batch_size=8 wandb.enabled=False
 """
 
+import copy
 import os
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -58,6 +60,47 @@ from utils import get_column_normalizer, ModelObjectCallBack
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _encode_worker(
+    jepa: torch.nn.Module,
+    h5_path: Path,
+    row_start: int,
+    row_end: int,
+    batch_size: int,
+    device: str,
+    img_size: int,
+    out: list,
+    idx: int,
+) -> None:
+    """Thread worker: encode rows [row_start, row_end) on `device`; store array in out[idx]."""
+    stats = spt.data.dataset_stats.ImageNet
+    transform = T.Compose([
+        T.ToDtype(torch.float32, scale=True),
+        T.Normalize(mean=stats["mean"], std=stats["std"]),
+        T.Resize(size=img_size, antialias=True),
+    ])
+    n = row_end - row_start
+    arr = None
+    t0 = time.perf_counter()
+    with h5py.File(h5_path, "r") as f:
+        for s in range(row_start, row_end, batch_size):
+            e = min(s + batch_size, row_end)
+            raw = f["pixels"][s:e]
+            frames = torch.from_numpy(raw).permute(0, 3, 1, 2)
+            frames = transform(frames).unsqueeze(1).to(device)
+            with torch.no_grad():
+                emb = jepa.encode({"pixels": frames})["emb"][:, 0]
+            if arr is None:
+                arr = np.zeros((n, emb.shape[-1]), dtype=np.float32)
+            arr[s - row_start : e - row_start] = emb.float().cpu().numpy()
+            done = e - row_start
+            if (done // batch_size) % 20 == 0 or e == row_end:
+                py_log.info(
+                    "[%s]  %.1f%%  (%d/%d)  %.1fs",
+                    device, 100.0 * done / n, done, n, time.perf_counter() - t0,
+                )
+    out[idx] = arr
+
+
 def _ensure_embeddings(
     jepa: torch.nn.Module,
     h5_path: Path,
@@ -65,17 +108,22 @@ def _ensure_embeddings(
     img_size: int,
     device: str,
     batch_size: int = 1024,
+    extra_device: str | None = None,
     rank: int = 0,
     world_size: int = 1,
 ) -> None:
     """Encode this rank's frame shard and write it to disk.
 
-    When world_size > 1 each rank encodes rows
-    [rank*n//world_size, (rank+1)*n//world_size) and writes a shard file.
-    The caller is responsible for the two dist.barrier() calls and the
-    rank-0 merge step.  When world_size == 1 this writes directly to
-    out_path (via a tmp-rename).  If out_path already exists (merged cache
-    from a previous run) the function returns immediately on all ranks.
+    Single-process (world_size == 1):
+      - extra_device=None  → one GPU, sequential
+      - extra_device="cuda:1" → two threads on two GPUs, ~2× faster
+
+    DDP (world_size > 1, launched via torchrun):
+      - each rank independently encodes its shard; extra_device is ignored
+      - caller handles the two dist.barrier() + rank-0 merge
+
+    If out_path already exists (merged cache from a previous run) all ranks
+    return immediately.
     """
     if out_path.exists():
         if rank == 0:
@@ -83,56 +131,65 @@ def _ensure_embeddings(
         return
 
     if world_size == 1:
-        shard_path = out_path          # single rank: write straight to final path
+        shard_path = out_path
     else:
         shard_path = out_path.with_name(f"{out_path.stem}.shard{rank}.npy")
         if shard_path.exists():
             py_log.info("[rank %d] Shard already on disk, skipping encode", rank)
             return
 
-    py_log.info("[rank %d/%d] Encoding shard from %s …", rank, world_size, h5_path)
     jepa.to(device).eval()
-    stats = spt.data.dataset_stats.ImageNet
-    transform = T.Compose([
-        T.ToDtype(torch.float32, scale=True),
-        T.Normalize(mean=stats["mean"], std=stats["std"]),
-        T.Resize(size=img_size, antialias=True),
-    ])
+
+    with h5py.File(h5_path, "r") as f:
+        n_total = int(f["pixels"].shape[0])
+
+    row_start = rank * n_total // world_size
+    row_end = (rank + 1) * n_total // world_size
+    n_shard = row_end - row_start
+
+    py_log.info(
+        "[rank %d/%d] Encoding rows %d–%d (%d frames) on %s%s",
+        rank, world_size, row_start, row_end, n_shard, device,
+        f" + {extra_device}" if extra_device and world_size == 1 else "",
+    )
 
     t0 = time.perf_counter()
-    # h5py SWMR mode allows concurrent readers on the same file — safe for DDP.
-    with h5py.File(h5_path, "r", swmr=True) as f:
-        n_total = int(f["pixels"].shape[0])
-        row_start = rank * n_total // world_size
-        row_end = (rank + 1) * n_total // world_size
-        n_shard = row_end - row_start
-        py_log.info("[rank %d] rows %d–%d (%d frames)", rank, row_start, row_end, n_shard)
-        all_emb = None
 
-        for s in range(row_start, row_end, batch_size):
-            e = min(s + batch_size, row_end)
-            raw = f["pixels"][s:e]                              # (B, H, W, C) uint8
-            frames = torch.from_numpy(raw).permute(0, 3, 1, 2) # (B, C, H, W)
-            frames = transform(frames).unsqueeze(1).to(device)  # (B, 1, C, H, W)
-            with torch.no_grad():
-                emb = jepa.encode({"pixels": frames})["emb"][:, 0]  # (B, D)
-            if all_emb is None:
-                all_emb = np.zeros((n_shard, emb.shape[-1]), dtype=np.float32)
-            local_s = s - row_start
-            local_e = e - row_start
-            all_emb[local_s:local_e] = emb.float().cpu().numpy()
-
-            if (local_s // batch_size) % 20 == 0 or e == row_end:
-                py_log.info(
-                    "[rank %d]  %.1f%%  (%d/%d)  %.1fs",
-                    rank, 100.0 * local_e / n_shard, local_e, n_shard,
-                    time.perf_counter() - t0,
-                )
+    if extra_device is not None and world_size == 1:
+        # Two-GPU threading: split the shard evenly between primary and extra device.
+        mid = (row_start + row_end) // 2
+        jepa2 = copy.deepcopy(jepa).to(extra_device).eval()
+        shards: list = [None, None]
+        threads = [
+            threading.Thread(
+                target=_encode_worker,
+                args=(jepa, h5_path, row_start, mid, batch_size, device, img_size, shards, 0),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_encode_worker,
+                args=(jepa2, h5_path, mid, row_end, batch_size, extra_device, img_size, shards, 1),
+                daemon=True,
+            ),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        all_emb = np.concatenate(shards, axis=0)
+    else:
+        # Single-GPU path (DDP shard or explicit single-GPU run).
+        out: list = [None]
+        _encode_worker(jepa, h5_path, row_start, row_end, batch_size, device, img_size, out, 0)
+        all_emb = out[0]
 
     tmp = shard_path.with_suffix(f".{os.getpid()}.tmp.npy")
     np.save(tmp, all_emb)
     tmp.rename(shard_path)
-    py_log.info("[rank %d] Shard saved to %s  (%.1fs)", rank, shard_path, time.perf_counter() - t0)
+    py_log.info(
+        "[rank %d] Embeddings saved to %s  (%.1fs)",
+        rank, shard_path, time.perf_counter() - t0,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -194,10 +251,12 @@ def run(cfg):
     _world = dist.get_world_size() if is_distributed else 1
 
     # All ranks encode their own shard in parallel (~2× faster on 2 A100s).
+    # In single-process mode, set cache_extra_device=cuda:1 to thread across 2 GPUs.
     _ensure_embeddings(
         jepa, cache_dir / f"{cfg.data.dataset.name}.h5", emb_path,
         cfg.img_size, device,
         batch_size=cfg.get("cache_batch_size", 1024),
+        extra_device=cfg.get("cache_extra_device", None),
         rank=_rank,
         world_size=_world,
     )
