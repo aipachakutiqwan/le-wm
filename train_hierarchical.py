@@ -193,32 +193,20 @@ def _ensure_embeddings(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Entry point
+# Training worker (called directly for 1 GPU, or via mp.spawn for N GPUs)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
-def run(cfg):
+def _do_train(rank: int, world_size: int, cfg) -> None:
     t_run = time.perf_counter()
 
-    # ── Distributed setup ─────────────────────────────────────────────────────
-    local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    is_distributed = local_rank >= 0
-    if is_distributed:
-        dist.init_process_group(backend="nccl")
-        torch.cuda.set_device(local_rank)
-        device = f"cuda:{local_rank}"
-    else:
-        device = cfg.device
-    is_main = not is_distributed or dist.get_rank() == 0
-    # ──────────────────────────────────────────────────────────────────────────
+    is_distributed = world_size > 1
+    is_main = rank == 0
+    device = f"cuda:{rank}" if is_distributed else cfg.device
 
     py_log.info(
-        "Hierarchical stage-2 training — data=%s checkpoint=%s  rank=%s/%s",
-        cfg.data.dataset.name,
-        cfg.stage1_checkpoint,
-        dist.get_rank() if is_distributed else 0,
-        dist.get_world_size() if is_distributed else 1,
+        "Hierarchical stage-2 training — data=%s checkpoint=%s  rank=%d/%d",
+        cfg.data.dataset.name, cfg.stage1_checkpoint, rank, world_size,
     )
 
     #########################
@@ -247,18 +235,15 @@ def run(cfg):
     ckpt_stem = Path(cfg.stage1_checkpoint).stem
     emb_path = cache_dir / f"{cfg.data.dataset.name}_{ckpt_stem}_img{cfg.img_size}_emb.npy"
 
-    _rank = dist.get_rank() if is_distributed else 0
-    _world = dist.get_world_size() if is_distributed else 1
-
-    # All ranks encode their own shard in parallel (~2× faster on 2 A100s).
-    # In single-process mode, set cache_extra_device=cuda:1 to thread across 2 GPUs.
+    # Each rank encodes its own shard; in single-process mode cache_extra_device
+    # enables a second thread on a second GPU.
     _ensure_embeddings(
         jepa, cache_dir / f"{cfg.data.dataset.name}.h5", emb_path,
         cfg.img_size, device,
         batch_size=cfg.get("cache_batch_size", 1024),
         extra_device=cfg.get("cache_extra_device", None),
-        rank=_rank,
-        world_size=_world,
+        rank=rank,
+        world_size=world_size,
     )
 
     if is_distributed:
@@ -266,9 +251,9 @@ def run(cfg):
         if is_main and not emb_path.exists():
             shard_files = [
                 emb_path.with_name(f"{emb_path.stem}.shard{r}.npy")
-                for r in range(_world)
+                for r in range(world_size)
             ]
-            py_log.info("Merging %d shards into %s", _world, emb_path)
+            py_log.info("Merging %d shards into %s", world_size, emb_path)
             merged = np.concatenate([np.load(p) for p in shard_files], axis=0)
             tmp = emb_path.with_suffix(f".{os.getpid()}.tmp.npy")
             np.save(tmp, merged)
@@ -341,7 +326,7 @@ def run(cfg):
     )
     model = model.to(device)
     if is_distributed:
-        model = DDP(model, device_ids=[local_rank])
+        model = DDP(model, device_ids=[rank])
 
     ##########################
     ##       training       ##
@@ -406,6 +391,41 @@ def run(cfg):
 
     if wandb_run is not None:
         wandb_run.finish()
+
+
+def _ddp_worker(rank: int, world_size: int, cfg_dict: dict) -> None:
+    """mp.spawn entry point: initialise DDP then run training."""
+    torch.multiprocessing.set_sharing_strategy("file_system")
+    cfg = OmegaConf.create(cfg_dict)
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", str(cfg.get("ddp_port", 29500)))
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+    try:
+        _do_train(rank=rank, world_size=world_size, cfg=cfg)
+    finally:
+        dist.destroy_process_group()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@hydra.main(version_base=None, config_path="./config/train", config_name="hierarchical")
+def run(cfg) -> None:
+    num_gpus = cfg.get("num_gpus", 1)
+    if num_gpus > 1:
+        # Spawn one process per GPU — no torchrun needed.
+        cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+        torch.multiprocessing.spawn(
+            _ddp_worker,
+            args=(num_gpus, cfg_dict),
+            nprocs=num_gpus,
+            join=True,
+        )
+    else:
+        _do_train(rank=0, world_size=1, cfg=cfg)
 
 
 if __name__ == "__main__":

@@ -19,10 +19,15 @@ train_split: 0.9
 
 device: cuda
 
+# Number of GPUs to use. Set to 2 to spawn two DDP workers via mp.spawn (no torchrun needed).
+# With num_gpus=2 the embedding cache is also split: rank 0 encodes the first half on cuda:0,
+# rank 1 encodes the second half on cuda:1 — cache_extra_device is then ignored.
+num_gpus: 1
+ddp_port: 29500   # NCCL rendezvous port; change if 29500 is already in use
+
 cache_batch_size: 1024   # batch size for the one-time embedding cache pass; increase to saturate VRAM
-# Second GPU for the one-time embedding cache build. Set to "cuda:1" on a two-A100 node to
-# split the ViT forward pass across both GPUs via threading (~2× faster). Ignored in DDP mode
-# (torchrun), where each rank already encodes its own shard on its own GPU.
+# Used only when num_gpus=1. Set to "cuda:1" to split the embedding cache across 2 GPUs via
+# threading (~2× faster). Ignored when num_gpus=2 (DDP handles the split automatically).
 cache_extra_device: null
 
 loader:
