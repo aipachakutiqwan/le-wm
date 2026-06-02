@@ -336,8 +336,13 @@ def _do_train(rank: int, world_size: int, cfg) -> None:
         dropout=cfg.stage2.get("dropout", 0.0),
     )
     model = model.to(device)
+    if cfg.stage2.freeze_encoder:
+        # Freeze before DDP so the frozen params are excluded from all-reduce buckets.
+        # train_hierarchical_lewm repeats this call, but it becomes a no-op.
+        for p in model.jepa.parameters():
+            p.requires_grad_(False)
     if is_distributed:
-        model = DDP(model, device_ids=[rank])
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     ##########################
     ##       training       ##
