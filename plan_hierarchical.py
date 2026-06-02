@@ -401,14 +401,19 @@ def run(cfg: DictConfig):
 
     sr = float(np.mean(succ)) if (succ is not None and succ.ndim > 0) else float("nan")
     env_tag = cfg.world.env_name.replace("/", "_")
+    ckpt_path = Path(cfg.checkpoint)
     auto_name = (
         f"{env_tag}_H{cfg.plan.H_high}_h{cfg.plan.h_low}"
         f"_oi{cfg.plan.outer_iters}_ii{cfg.plan.inner_iters}"
-        f"_n{cfg.eval.num_eval}_seed{cfg.seed}_sr{sr:.3f}.txt"
+        f"_n{cfg.eval.num_eval}_seed{cfg.seed}_sr{sr:.3f}"
+        f"_{ckpt_path.parent.name}_{ckpt_path.stem}.txt"
     )
     out = results_path / (cfg.output.get("filename") or auto_name)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("a") as f:
+        f.write("\n==== MODEL ====\n")
+        f.write(f"checkpoint_folder: {ckpt_path.parent}\n")
+        f.write(f"checkpoint_name:   {ckpt_path.name}\n")
         f.write("\n==== CONFIG ====\n")
         f.write(OmegaConf.to_yaml(cfg))
         f.write("\n==== RESULTS ====\n")
