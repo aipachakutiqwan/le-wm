@@ -356,11 +356,15 @@ def run(cfg: DictConfig):
     if len(eval_episodes) < cfg.eval.num_eval:
         raise ValueError("Not enough episodes with sufficient length for evaluation.")
 
-    # Initial agent-to-goal distance per episode. Goal is the demo's pos_agent
-    # goal_offset_steps later (same episode — guaranteed by the max_start filter).
-    start_pos = np.asarray(dataset.get_row_data(chosen)["pos_agent"])
-    goal_pos = np.asarray(dataset.get_row_data(chosen + cfg.eval.goal_offset_steps)["pos_agent"])
-    init_dist = np.linalg.norm(start_pos - goal_pos, axis=-1)
+    # Initial agent-to-goal distance per episode (tworoom diagnostic).
+    # Uses pos_agent when available; silently skipped for envs that don't expose it.
+    _dist_col = cfg.eval.get("dist_col", "pos_agent")
+    if _dist_col in dataset.column_names:
+        start_pos = np.asarray(dataset.get_row_data(chosen)[_dist_col])
+        goal_pos = np.asarray(dataset.get_row_data(chosen + cfg.eval.goal_offset_steps)[_dist_col])
+        init_dist = np.linalg.norm(start_pos - goal_pos, axis=-1)
+    else:
+        init_dist = None
 
     ##########################
     ##      evaluation      ##
@@ -388,7 +392,7 @@ def run(cfg: DictConfig):
     # If successes are concentrated at small init_dist, the 20% is "free" (the planner
     # isn't earning it) — points to a model/execution problem rather than weak search.
     succ = np.asarray(metrics.get("episode_successes"))
-    if succ is not None and succ.shape == init_dist.shape:
+    if init_dist is not None and succ is not None and succ.shape == init_dist.shape:
         order = np.argsort(init_dist)
         py_log.info("per-episode (sorted by initial distance to goal):")
         for j in order:
