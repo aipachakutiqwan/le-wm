@@ -85,6 +85,7 @@ def plan(
     inner_std: float = 1.0,
     warmstart: dict | None = None,
     stats: dict | None = None,
+    step: int | None = None,
 ) -> torch.Tensor:
     """Two-level CEM-MPC. Returns the first primitive action to execute.
 
@@ -137,6 +138,21 @@ def plan(
     amp_enabled = device_type == "cuda"
     t0 = time.perf_counter()
 
+    step_tag = f"step={step}  " if step is not None else ""
+    dist_init_goal = (z_goal - z_init).abs().sum().item()
+
+    # Progress: Δ vs previous call and % of initial distance covered.
+    if stats is not None:
+        init_dist0 = stats.setdefault("init_dist0", dist_init_goal)
+        delta = stats.get("prev_dist", dist_init_goal) - dist_init_goal  # +ve = closer
+        pct   = 100.0 * (1.0 - dist_init_goal / init_dist0) if init_dist0 > 0 else 0.0
+        prog_str = f"  Δ={delta:+.4f}  done={pct:.1f}%"
+        stats["prev_dist"] = dist_init_goal
+    else:
+        prog_str = ""
+
+    py_log.debug("%sz_init→z_goal L1=%.4f%s", step_tag, dist_init_goal, prog_str)
+
     # Progressive weights: later subgoals matter more; normalised to sum = 1.
     w_high = torch.linspace(1.0 / H_high, 1.0, H_high, device=device)
     w_high = w_high / w_high.sum()                                        # (H,)
@@ -166,7 +182,8 @@ def plan(
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
     outer_ms = (time.perf_counter() - t_outer) * 1e3
     outer_cost_val = outer_cost(best_mac.unsqueeze(0)).item()
-    py_log.info("outer CEM — best_cost=%.4f  %.1f ms", outer_cost_val, outer_ms)
+    py_log.info("%souter CEM — best_cost=%.4f  dist=%.4f%s  %.1f ms",
+                step_tag, outer_cost_val, dist_init_goal, prog_str, outer_ms)
 
     if warmstart is not None:
         warmstart["mu_mac"] = best_mac.cpu()
@@ -174,6 +191,10 @@ def plan(
     # ── Derive first subgoal ──────────────────────────────────────────────────
     with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
         z_sg = model._rollout_high(z_init, best_mac.unsqueeze(0))[:, 0].squeeze(0)  # (D,)
+    dist_init_sg = (z_sg - z_init).abs().sum().item()
+    dist_sg_goal = (z_goal - z_sg).abs().sum().item()
+    py_log.debug("%ssubgoal — z_init→z_sg L1=%.4f  z_sg→z_goal L1=%.4f",
+                 step_tag, dist_init_sg, dist_sg_goal)
 
     # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
@@ -196,8 +217,8 @@ def plan(
     inner_cost_val = inner_cost(best_act.unsqueeze(0)).item()
     total_ms = (time.perf_counter() - t0) * 1e3
     py_log.info(
-        "inner CEM — best_cost=%.4f  %.1f ms  |  total plan=%.1f ms",
-        inner_cost_val, inner_ms, total_ms,
+        "%sinner CEM — best_cost=%.4f  %.1f ms  |  total=%.1f ms",
+        step_tag, inner_cost_val, inner_ms, total_ms,
     )
 
     if stats is not None:

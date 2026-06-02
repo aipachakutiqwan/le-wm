@@ -67,10 +67,14 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self._action_queue: deque = deque()
         # effective_action_dim = frameskip * base_action_dim; derived at first get_action call
         self._frameskip: int | None = None
+        self._plan_step: int = 0
+        self._plan_stats: dict = {}
 
     def set_env(self, env) -> None:
         self.env = env
         self._action_queue.clear()
+        self._plan_step = 0
+        self._plan_stats = {}   # cleared each episode; init_dist0/prev_dist reset automatically
 
     def _encode(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode pixel tensor to latent states.
@@ -115,6 +119,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
 
         n_envs = z_init.shape[0]
         effective_actions = []
+        self._plan_step += 1
         for i in range(n_envs):
             a = plan(
                 self.model,
@@ -128,6 +133,8 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                 inner_iters=self.plan_cfg.inner_iters,
                 outer_std=self.plan_cfg.get("outer_std", 5.0),
                 inner_std=self.plan_cfg.get("inner_std", 1.0),
+                stats=self._plan_stats,
+                step=self._plan_step if n_envs == 1 else None,
             )
             effective_actions.append(a.cpu().numpy())
 
