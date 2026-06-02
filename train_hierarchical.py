@@ -273,7 +273,7 @@ class HierarchicalLeWMLit(pl.LightningModule):
         self.log("train/loss_kl",      out["loss_kl"],   on_step=False, on_epoch=True, sync_dist=True)
         self.log("train/mac_absmean",  mac_absmean,      on_step=False, on_epoch=True, sync_dist=True)
         self.log("train/mac_std",      mac_std,          on_step=False, on_epoch=True, sync_dist=True)
-        self.log("train/tf_prob",      self._tf_prob,    on_step=False, on_epoch=False)
+        self.log("train/tf_prob",      self._tf_prob,    on_step=False, on_epoch=True)
         return out["loss"]
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
