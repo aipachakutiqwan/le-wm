@@ -377,10 +377,6 @@ def plan_batched(
     )
 
     if stats is not None:
-        dist_now = (z_goal - z_init).abs().sum(-1).mean().item()   # mean L1 across envs
-        if "init_dist0" not in stats:
-            stats["init_dist0"] = dist_now
-        stats["prev_dist"] = dist_now
         stats["n_calls"]  = stats.get("n_calls",  0)   + 1
         stats["total_ms"] = stats.get("total_ms", 0.0) + total_ms
         stats["outer_ms"] = stats.get("outer_ms", 0.0) + outer_ms

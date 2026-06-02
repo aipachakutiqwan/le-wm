@@ -14,6 +14,11 @@ extra_device: cuda:1
 # Adds a ~2 min one-time warm-up; reduces per-call overhead by ~15-20% after.
 compile_planner: false
 
+# Max environments processed per plan_batched call per GPU.
+# Limits peak VRAM to chunk_size × outer_samples forward passes, preventing
+# GPU saturation from killing MuJoCo's EGL contexts mid-evaluation.
+env_chunk_size: 10
+
 seed: 42
 
 # Diagnostic: replace the planner with random actions to measure the "free" success
