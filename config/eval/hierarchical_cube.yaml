@@ -43,12 +43,12 @@ dataset:
 # Two-level CEM hyperparameters (mirror defaults from hierarchical_plan.plan)
 plan:
   H_high: 1          # subgoal one macro from z_now; prevents H>=2 rollout drift
-  h_low: 10
+  h_low: 3
   outer_samples: 512
   inner_samples: 256
   outer_iters: 5
   inner_iters: 30    # the big lever; 5 rounds can't converge in ~100-D action space
-  outer_std: 5.0     # matches A_ψ's empirical macro-action spread (per-dim std up to ~2)
+  outer_std: 2.5     # matches A_ψ's empirical macro-action spread (per-dim std up to ~2)
   inner_std: 1.0     # matches StandardScaler-normalised action scale (~1.0)
 
 # MPC loop config fed to swm.PlanConfig
