@@ -7,7 +7,12 @@
 out/
 .ipynb_checkpoints/
 
-
+presentations/*
+notebooks/*
+tests/*
+plans/*
+notes/
+issues/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -237,6 +242,11 @@ requirements_frozen*.txt
 # hydra ouputs
 outputs/
 
+# qualitative trajectory-study run outputs (regenerable via path_trajectories/README.md):
+# .npz + rollout .mp4s + results.txt + ckpt symlinks. runs/figures/ stays tracked (deliverables).
+qualitative analysis/path_trajectories/runs/flat_*/
+qualitative analysis/path_trajectories/runs/hier_*/
+
 # uv lock since we have different local setups
 uv.lock
 
@@ -246,3 +256,9 @@ lewm/
 # assets
 assets/*.svg
 
+
+# local-only docs (kept out of version control)
+CLAUDE.md
+CONTEXT.md
+RUNS.md
+experiments.md

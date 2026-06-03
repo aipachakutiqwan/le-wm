@@ -36,6 +36,12 @@ from torchvision.transforms import v2 as transforms
 
 from hierarchical_plan import plan
 
+import sys
+# traj_recording.py now lives in qualitative analysis/path_trajectories/ — add that
+# folder to sys.path (parent dir name has a space, so no clean package import).
+sys.path.insert(0, str(Path(__file__).resolve().parent / "qualitative analysis" / "path_trajectories"))
+from traj_recording import RecordingPolicy, save_trajectories_npz
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Policy
@@ -289,6 +295,10 @@ def run(cfg: DictConfig):
     ##      evaluation      ##
     ##########################
 
+    # --- trajectory recording (opt-in; default off keeps baseline eval intact) ---
+    if cfg.get("record_trajectories", False):
+        policy = RecordingPolicy(policy)
+
     world.set_policy(policy)
     results_path = Path(cfg.checkpoint).parent
 
@@ -306,6 +316,15 @@ def run(cfg: DictConfig):
 
     py_log.info("metrics: %s", metrics)
     py_log.info("evaluation time: %.1f s", elapsed)
+
+    # --- trajectory recording: dump paths + start/goal next to the results file ---
+    if cfg.get("record_trajectories", False):
+        npz = save_trajectories_npz(
+            results_path / cfg.get("traj_npz", "trajectories_hier.npz"),
+            policy, metrics, eval_episodes, eval_start_idx,
+            start_proprio=start_pos, goal_proprio=goal_pos,
+        )
+        py_log.info("trajectories saved to %s", npz)
 
     # Per-episode breakdown: does success correlate with starting near the goal?
     # If successes are concentrated at small init_dist, the 20% is "free" (the planner
