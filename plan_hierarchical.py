@@ -50,26 +50,32 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
 
     Parameters
     ----------
-    model      : trained HierarchicalLeWM
-    plan_cfg   : OmegaConf node with H_high / h_low / *_samples / *_iters
-    process    : dict of sklearn-style column normalisers (same as eval.py)
-    transform  : dict of torchvision image transforms keyed by obs key
-    device     : torch device string
+    model       : trained HierarchicalLeWM
+    plan_cfg    : OmegaConf node with H_high / h_low / *_samples / *_iters
+    process     : dict of sklearn-style column normalisers (same as eval.py)
+    transform   : dict of torchvision image transforms keyed by obs key
+    device      : torch device string
+    eval_budget : primitive-step budget per episode; used to compute total plan steps
     """
 
-    def __init__(self, model, plan_cfg, process, transform, device):
+    def __init__(self, model, plan_cfg, process, transform, device, eval_budget: int | None = None):
         super().__init__()
         self.model = model.eval().to(device)
         self.plan_cfg = plan_cfg
         self.process = process
         self.transform = transform
         self.device = device
+        self._eval_budget = eval_budget
         self._action_queue: deque = deque()
         self._frameskip: int | None = None
+        self._plan_step: int = 0
+        self._total_plan_steps: int | None = None
 
     def set_env(self, env) -> None:
         self.env = env
         self._action_queue.clear()
+        self._plan_step = 0
+        self._total_plan_steps = None
 
     def _encode(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode pixel tensor to latent states.
@@ -106,6 +112,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         if self._action_queue:
             return self._action_queue.popleft()
 
+        self._plan_step += 1
         info_dict = self._prepare_info(info_dict)
 
         # after _prepare_info: pixels / goal are (E, T, C, H, W) tensors
@@ -114,6 +121,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
 
         n_envs = z_init.shape[0]
         effective_actions = []
+        t0 = time.perf_counter()
         for i in range(n_envs):
             a = plan(
                 self.model,
@@ -125,8 +133,12 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                 inner_samples=self.plan_cfg.inner_samples,
                 outer_iters=self.plan_cfg.outer_iters,
                 inner_iters=self.plan_cfg.inner_iters,
+                outer_std=self.plan_cfg.get("outer_std", 5.0),
+                inner_std=self.plan_cfg.get("inner_std", 1.0),
+                step=self._plan_step,
             )
             effective_actions.append(a.cpu().numpy())
+        elapsed_ms = (time.perf_counter() - t0) * 1e3
 
         # effective_actions: list of (effective_action_dim,) → stack to (E, eff_dim)
         eff = np.stack(effective_actions)
@@ -136,17 +148,31 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             base_dim = scaler.n_features_in_
             if self._frameskip is None:
                 self._frameskip = eff.shape[-1] // base_dim
+                if self._eval_budget is not None:
+                    self._total_plan_steps = self._eval_budget // self._frameskip
             fs = self._frameskip
-            # reshape to (E * fs, base_dim), inverse-transform, reshape to (fs, E, base_dim)
-            prim = eff.reshape(n_envs * fs, base_dim)
-            prim = scaler.inverse_transform(prim)
-            prim = prim.reshape(fs, n_envs, base_dim)
+            # eff[e] = [prim_0, prim_1, ..., prim_{fs-1}] concatenated (env-major layout).
+            # Reshape to (E, fs, base), inverse-transform, then transpose to (fs, E, base)
+            # so prim[t, e] = primitive t for env e.  A flat reshape to (E*fs, base) then
+            # reshape(fs, E, base) would interleave envs and primitives incorrectly.
+            prim = eff.reshape(n_envs, fs, base_dim)
+            prim = scaler.inverse_transform(prim.reshape(-1, base_dim))
+            prim = prim.reshape(n_envs, fs, base_dim).transpose(1, 0, 2)
         else:
             base_dim = eff.shape[-1]
             if self._frameskip is None:
                 self._frameskip = 1
+                if self._eval_budget is not None:
+                    self._total_plan_steps = self._eval_budget // self._frameskip
             fs = self._frameskip
             prim = eff.reshape(fs, n_envs, base_dim)
+
+        step_str = (
+            f"{self._plan_step}/{self._total_plan_steps}"
+            if self._total_plan_steps is not None
+            else str(self._plan_step)
+        )
+        py_log.info("plan step %s — %d env(s) — %.0f ms", step_str, n_envs, elapsed_ms)
 
         # queue steps 1..fs-1; return step 0 immediately
         for t in range(1, fs):
@@ -237,13 +263,18 @@ def run(cfg: DictConfig):
     py_log.info("Loading checkpoint from %s", cfg.checkpoint)
     model = torch.load(cfg.checkpoint, map_location=cfg.device, weights_only=False)
 
-    policy = HierarchicalPolicy(
-        model=model,
-        plan_cfg=cfg.plan,
-        process=process,
-        transform=transform,
-        device=cfg.device,
-    )
+    if cfg.get("random_policy", False):
+        py_log.info("DIAGNOSTIC: using RandomPolicy (planner disabled)")
+        policy = swm.policy.RandomPolicy()
+    else:
+        policy = HierarchicalPolicy(
+            model=model,
+            plan_cfg=cfg.plan,
+            process=process,
+            transform=transform,
+            device=cfg.device,
+            eval_budget=cfg.eval.eval_budget,
+        )
 
     ##########################
     ##     episode sample   ##
