@@ -1,0 +1,69 @@
+
+==== MODEL ====
+checkpoint_folder: /var/cs231n/lewm-pusht/20260603_151955
+checkpoint_name:   hierarchical_lewm_epoch_60_object.ckpt
+
+==== CONFIG ====
+checkpoint: /var/cs231n/lewm-pusht/20260603_151955/hierarchical_lewm_epoch_60_object.ckpt
+device: cuda
+extra_device: cuda:1
+compile_planner: false
+seed: 42
+random_policy: false
+world:
+  env_name: swm/PushT-v1
+  num_envs: ${eval.num_eval}
+  max_episode_steps: 500
+  history_size: 3
+  frame_skip: 1
+dataset:
+  name: pusht_expert_train
+  keys_to_cache:
+  - action
+  - proprio
+  - state
+plan:
+  H_high: 1
+  h_low: 3
+  outer_samples: 512
+  inner_samples: 256
+  outer_iters: 5
+  inner_iters: 30
+  outer_std: 2.5
+  inner_std: 1.0
+plan_config:
+  horizon: 1
+  receding_horizon: 1
+  history_len: 1
+  action_block: 1
+eval:
+  num_eval: 100
+  goal_offset_steps: 25
+  eval_budget: 250
+  img_size: 224
+  dataset_name: pusht_expert_train
+  callables:
+  - method: _set_state
+    args:
+      state:
+        value: state
+  - method: _set_goal_state
+    args:
+      goal_state:
+        value: goal_state
+output: {}
+
+==== RESULTS ====
+metrics: {'success_rate': 50.0, 'episode_successes': array([False,  True,  True, False, False,  True, False, False,  True,
+        True,  True, False,  True,  True, False,  True,  True, False,
+        True,  True, False, False, False,  True,  True, False, False,
+       False,  True, False,  True, False,  True, False, False,  True,
+        True, False, False, False, False,  True,  True,  True,  True,
+       False, False, False, False,  True, False, False, False, False,
+       False, False,  True,  True, False,  True,  True, False,  True,
+       False,  True, False,  True,  True,  True, False,  True, False,
+       False,  True,  True,  True,  True,  True,  True,  True, False,
+        True, False, False, False, False,  True,  True,  True, False,
+        True,  True, False, False, False, False,  True,  True, False,
+        True]), 'seeds': None}
+evaluation_time: 2941.2 s
