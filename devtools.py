@@ -383,9 +383,8 @@ class DevTools:
         if overrides_str:
             cmd += ["--overrides", overrides_str]
 
-        env = {**os.environ, "LEWM_TAG": tag}
         log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
-        self._run(cmd, check=True, env=env)
+        self._run(cmd)
 
 
     def dev(self, tag: str) -> None:
