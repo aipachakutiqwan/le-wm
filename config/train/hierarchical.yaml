@@ -48,7 +48,7 @@ stage2:
   # teacher forcing (original behaviour). When True, the teacher-forcing probability is
   # annealed ss_start -> ss_end over epochs so P^(2) is trained on its own rollouts and
   # penalised for compounding error (the fix for the H>=2 fidelity collapse).
-  rollout_loss: False
+  rollout_loss: True
   ss_start: 1.0           # teacher-forcing prob at epoch 0 (1.0 = fully teacher-forced)
   ss_end: 0.25            # teacher-forcing prob at final epoch (0.0 = full free-running)
   # Regularisation for A_ψ / P^(2) (held-out TF loss 0.84 vs train 0.17 -> overfitting).
@@ -71,7 +71,7 @@ wm:
   n_waypoints: 4          # N interior waypoints (6 total with endpoints, matches PLDM B.4)
   latent_action_dim: 8    # d_L — matches PLDM B.4; wider bottleneck for action info
   lambda_var: 0.0         # hinge variance penalty on macro-actions (0 = disabled; superseded by lambda_kl)
-  lambda_kl: 0.01         # moment-matching to N(0,I) on A_ψ outputs: mean²+(std-1)²
+  lambda_kl: 0.03         # moment-matching to N(0,I) on A_ψ outputs: mean²+(std-1)²
   high_depth: 6
   high_heads: 16
   high_mlp_dim: 2048
