@@ -15,7 +15,6 @@ python plan_hierarchical.py checkpoint=<path> device=cuda
 """
 
 import copy
-import gc
 import os
 import logging
 import threading
@@ -438,20 +437,15 @@ def run(cfg: DictConfig):
     )
 
     t0 = time.time()
-    try:
-        metrics = world.evaluate_from_dataset(
-            dataset,
-            start_steps=eval_start_idx.tolist(),
-            goal_offset_steps=cfg.eval.goal_offset_steps,
-            eval_budget=cfg.eval.eval_budget,
-            episodes_idx=eval_episodes.tolist(),
-            callables=OmegaConf.to_container(cfg.eval.get("callables"), resolve=True),
-            video_path=results_path,
-        )
-    finally:
-        world.close()   # free EGL contexts
-        del world
-        gc.collect()    # destroy GL Python objects now, before EGL display terminates at shutdown
+    metrics = world.evaluate_from_dataset(
+        dataset,
+        start_steps=eval_start_idx.tolist(),
+        goal_offset_steps=cfg.eval.goal_offset_steps,
+        eval_budget=cfg.eval.eval_budget,
+        episodes_idx=eval_episodes.tolist(),
+        callables=OmegaConf.to_container(cfg.eval.get("callables"), resolve=True),
+        video_path=results_path,
+    )
     elapsed = time.time() - t0
 
     py_log.info("metrics: %s", metrics)
