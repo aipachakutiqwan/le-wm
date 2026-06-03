@@ -11,7 +11,7 @@ planning, no training.** Light on GPU and crash-free.
 |---|---|---|
 | `latent_grid_tsne.py` | `figures/latent_grid_tworoom.png` | The **frozen encoder** latent space (shared by flat & hierarchical). A grid of TwoRoom states is encoded and t-SNE'd; coloring by agent (x, y) shows the encoder represents spatial position (two-room topology preserved). Left = physical state grid (the color legend), right = latent t-SNE. |
 | `macro_action_tsne.py` | `figures/macro_action_tworoom.png` | The **hierarchy's own latent**: A_ψ's 8-d macro-action space. Real inter-waypoint action chunks are encoded to macros and t-SNE'd, colored by the chunk's net motion (Δx, Δy). Shows A_ψ organizes macro-actions by direction/magnitude of motion. Also writes the `.npz` the probe needs. |
-| `macro_probe.py` | `figures/macro_probe_tworoom.pdf` (+ `.png`) | **Quantitative** companion: a 5-fold cross-validated linear regression macro (8-d) → net motion (Δx, Δy), with a predicted-vs-true scatter. Reports CV R² (≈0.90; Δy≈0.99, Δx≈0.80) → macros *linearly* encode net motion. |
+| `macro_probe.py` | `figures/macro_probe_tworoom.pdf` (+ `.png`) | **Quantitative** companion: a 5-fold cross-validated linear regression macro (8-d) → net motion (Δx, Δy), with a predicted-vs-true scatter. Reports CV R² (≈0.89; Δy≈0.98, Δx≈0.80) → macros *linearly* encode net motion. |
 
 ## The figures
 
@@ -33,11 +33,11 @@ A_ψ encodes direction/magnitude of motion.
 
 ### 3. Macro-action linear probe — `macro_probe_tworoom.png`
 
-![Linear probe predicted-vs-true net motion: Δx (top, R²=0.80) and Δy (bottom, R²=0.99) against the ideal y=x line.](figures/macro_probe_tworoom.png)
+![Linear probe predicted-vs-true net motion: Δx (top, R²=0.80) and Δy (bottom, R²=0.98) against the ideal y=x line.](figures/macro_probe_tworoom.png)
 
 Quantitative companion to figure 2: a 5-fold cross-validated linear probe from
-each macro-action to its chunk's net motion. Overall CV R²=0.90 (Δx 0.80,
-Δy 0.99); train R² = CV R² (no overfit) → macros *linearly* encode motion.
+each macro-action to its chunk's net motion. Overall CV R²=0.89 (Δx 0.80,
+Δy 0.98); train R² = CV R² (no overfit) → macros *linearly* encode motion.
 Single-column, Overleaf-ready vector at `figures/macro_probe_tworoom.pdf`.
 
 ## Prerequisites
