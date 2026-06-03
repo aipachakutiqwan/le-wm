@@ -356,6 +356,38 @@ class DevTools:
         log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
         subprocess.run(cmd, check=True, env=env)
 
+
+
+    def eval_hierarchical_local(self, tag: str, checkpoint: str, overrides: list = None) -> None:
+        """Submit a hierarchical planning eval job to Modal (A10G GPU).
+
+        checkpoint: absolute path inside /stablewm-home, e.g.
+            /stablewm-home/hwm_tworoom/<run_id>/<run_id>/hierarchical_lewm_best_object.ckpt
+
+        Results are written to hierarchical_results.txt next to the checkpoint.
+        Download with:
+            modal volume get lewm-data <run_id>/hierarchical_results.txt ./
+
+        Requires: pip install modal && modal setup
+        """
+        overrides_str = ""
+        if overrides:
+            if isinstance(overrides, str):
+                overrides = overrides.strip("[]").split(",")
+            overrides_str = ",".join(overrides)
+
+        cmd = [
+            "modal", "run", f"{REPO_ROOT / 'cloud' / 'modal_train.py'}::eval_hier",
+            "--checkpoint", checkpoint,
+        ]
+        if overrides_str:
+            cmd += ["--overrides", overrides_str]
+
+        env = {**os.environ, "LEWM_TAG": tag}
+        log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
+        self._run(cmd, check=True, env=env)
+
+
     def dev(self, tag: str) -> None:
         """Launch a bash shell with the local repo mounted at /app.
         Edits to the repo on the host are instantly reflected inside the container.
