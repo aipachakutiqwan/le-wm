@@ -384,6 +384,7 @@ class DevTools:
             cmd += ["--overrides", overrides_str]
 
         log.info("LEWM_TAG=%s %s", tag, " ".join(cmd))
+        print(f"cmd:{cmd}")
         self._run(cmd)
 
 
