@@ -14,10 +14,8 @@ python plan_hierarchical.py checkpoint=<path> eval.num_eval=10
 python plan_hierarchical.py checkpoint=<path> device=cuda
 """
 
-import copy
 import os
 import logging
-import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -36,24 +34,7 @@ from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 
 
-from hierarchical_plan import plan, compile_for_planning
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Thread worker for 2-GPU environment split
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def _plan_env_worker(model, z_init_slice, z_goal_slice, plan_kwargs, stats, results, idx):
-    """Run plan() sequentially over a slice of environments; store result or exception."""
-    try:
-        actions = []
-        for i in range(z_init_slice.shape[0]):
-            a = plan(model, z_init_slice[i], z_goal_slice[i], **plan_kwargs, stats=stats)
-            actions.append(a.cpu().numpy())
-        results[idx] = np.stack(actions)   # (slice_envs, action_dim)
-    except Exception as e:
-        results[idx] = e
+from hierarchical_plan import plan
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -65,42 +46,19 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
     """MPC policy backed by the two-level CEM planner.
 
     Inherits _prepare_info (image transforms + column normalisation) from
-    BasePolicy, then encodes the preprocessed observations and calls plan_batched()
-    for all environments in one shot.
-
-    When extra_device is provided a second copy of the model is loaded onto that
-    device and environments are split across both GPUs in parallel threads,
-    roughly halving wall-clock planning time.
+    BasePolicy, then encodes the preprocessed observations and calls plan().
 
     Parameters
     ----------
-    model          : trained HierarchicalLeWM
-    plan_cfg       : OmegaConf node with H_high / h_low / *_samples / *_iters
-    process        : dict of sklearn-style column normalisers (same as eval.py)
-    transform      : dict of torchvision image transforms keyed by obs key
-    device         : primary torch device string (e.g. "cuda:0")
-    extra_device   : optional second device string (e.g. "cuda:1"); when set a
-                     deepcopy of the model is placed there and environments are
-                     split evenly between the two GPUs via threading.
-    compile_planner: call compile_for_planning() on each device's model.
-                     Adds a ~2 min one-time warm-up; saves ~20 % per call after.
+    model      : trained HierarchicalLeWM
+    plan_cfg   : OmegaConf node with H_high / h_low / *_samples / *_iters
+    process    : dict of sklearn-style column normalisers (same as eval.py)
+    transform  : dict of torchvision image transforms keyed by obs key
+    device     : torch device string
     """
 
-    def __init__(
-        self,
-        model,
-        plan_cfg,
-        process,
-        transform,
-        device,
-        extra_device: str | None = None,
-        compile_planner: bool = False,
-        log_every: int = 5,
-        eval_budget: int | None = None,
-    ):
+    def __init__(self, model, plan_cfg, process, transform, device):
         super().__init__()
-        if compile_planner:
-            compile_for_planning(model)
         self.model = model.eval().to(device)
         self.plan_cfg = plan_cfg
         self.process = process
@@ -108,31 +66,10 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         self.device = device
         self._action_queue: deque = deque()
         self._frameskip: int | None = None
-        self._plan_step: int = 0
-        self._n_plan_total: int | None = None
-        self._eval_budget: int | None = eval_budget
-        self._plan_stats: dict = {}
-        self._log_every: int = log_every
-        self._t_start: float = time.time()
-
-        # Optional second GPU.
-        self._extra_device: str | None = None
-        self._extra_model = None
-        if extra_device is not None:
-            py_log.info("Replicating model to %s for two-GPU planning", extra_device)
-            extra_model = copy.deepcopy(model).eval().to(extra_device)
-            if compile_planner:
-                compile_for_planning(extra_model)
-            self._extra_model = extra_model
-            self._extra_device = extra_device
 
     def set_env(self, env) -> None:
         self.env = env
         self._action_queue.clear()
-        self._plan_step = 0
-        self._n_plan_total = None
-        self._plan_stats = {}
-        self._t_start = time.time()
 
     def _encode(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode pixel tensor to latent states.
@@ -153,9 +90,10 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
     def get_action(self, info_dict: dict, **kwargs) -> np.ndarray:
         """Plan and return the next primitive action for each environment.
 
-        All environments are planned in one batched call to plan_batched().
-        When a second GPU is configured, environments are split evenly across
-        both devices and the two halves run concurrently in threads.
+        plan() returns an *effective* action of shape (frameskip * base_dim,).
+        We split it into frameskip primitive actions, inverse-transform each,
+        and serve them one per call via an internal queue so the world only
+        needs frame_skip=1.
 
         Parameters
         ----------
@@ -169,78 +107,29 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             return self._action_queue.popleft()
 
         info_dict = self._prepare_info(info_dict)
+
+        # after _prepare_info: pixels / goal are (E, T, C, H, W) tensors
         z_init = self._encode(info_dict["pixels"])   # (E, D)
         z_goal = self._encode(info_dict["goal"])     # (E, D)
+
         n_envs = z_init.shape[0]
-        self._plan_step += 1
+        effective_actions = []
+        for i in range(n_envs):
+            a = plan(
+                self.model,
+                z_init[i],
+                z_goal[i],
+                H_high=self.plan_cfg.H_high,
+                h_low=self.plan_cfg.h_low,
+                outer_samples=self.plan_cfg.outer_samples,
+                inner_samples=self.plan_cfg.inner_samples,
+                outer_iters=self.plan_cfg.outer_iters,
+                inner_iters=self.plan_cfg.inner_iters,
+            )
+            effective_actions.append(a.cpu().numpy())
 
-        # Track mean latent L1 distance across all envs (keys distinct from plan()'s own
-        # per-env "init_dist0"/"prev_dist" keys, which would corrupt these mean values).
-        dist_now = (z_goal - z_init).abs().sum(-1).mean().item()
-        if "emb_init" not in self._plan_stats:
-            self._plan_stats["emb_init"] = dist_now
-        self._plan_stats["emb_prev"] = dist_now
-
-        plan_kwargs = dict(
-            H_high=self.plan_cfg.H_high,
-            h_low=self.plan_cfg.h_low,
-            outer_samples=self.plan_cfg.outer_samples,
-            inner_samples=self.plan_cfg.inner_samples,
-            outer_iters=self.plan_cfg.outer_iters,
-            inner_iters=self.plan_cfg.inner_iters,
-            outer_std=self.plan_cfg.get("outer_std", 5.0),
-            inner_std=self.plan_cfg.get("inner_std", 1.0),
-            step=self._plan_step,
-        )
-
-        if self._extra_model is not None and n_envs >= 2:
-            # Split environments between two GPUs and run each half sequentially per-env.
-            # Sequential plan() keeps peak VRAM at 1 env × outer_samples, avoiding the
-            # GPU saturation that kills MuJoCo's EGL contexts with batched planning.
-            # Thread 0 owns self._plan_stats to avoid races; thread 1 discards stats.
-            split = n_envs // 2
-            results = [None, None]
-            threads = [
-                threading.Thread(
-                    target=_plan_env_worker,
-                    args=(
-                        self.model,
-                        z_init[:split].to(self.device),
-                        z_goal[:split].to(self.device),
-                        plan_kwargs,
-                        self._plan_stats,
-                        results, 0,
-                    ),
-                ),
-                threading.Thread(
-                    target=_plan_env_worker,
-                    args=(
-                        self._extra_model,
-                        z_init[split:].to(self._extra_device),
-                        z_goal[split:].to(self._extra_device),
-                        plan_kwargs,
-                        None,
-                        results, 1,
-                    ),
-                ),
-            ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            for i, r in enumerate(results):
-                if isinstance(r, Exception):
-                    raise RuntimeError(f"GPU thread {i} failed") from r
-            eff = np.concatenate([results[0], results[1]], axis=0)
-        else:
-            actions = []
-            for i in range(n_envs):
-                a = plan(
-                    self.model, z_init[i], z_goal[i],
-                    **plan_kwargs, stats=self._plan_stats,
-                )
-                actions.append(a.cpu().numpy())
-            eff = np.stack(actions)
+        # effective_actions: list of (effective_action_dim,) → stack to (E, eff_dim)
+        eff = np.stack(effective_actions)
 
         if "action" in self.process:
             scaler = self.process["action"]
@@ -248,13 +137,10 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             if self._frameskip is None:
                 self._frameskip = eff.shape[-1] // base_dim
             fs = self._frameskip
-            # eff[e] is [prim_0, prim_1, ..., prim_{fs-1}] concatenated. Split per env
-            # first (E, fs, base), inverse-transform per row, then transpose to
-            # (fs, E, base) so prim[t, e] is env e's t-th primitive. Reshaping straight
-            # from (E*fs, base) to (fs, E, base) scrambles primitives across envs.
-            prim = eff.reshape(n_envs, fs, base_dim)
-            prim = scaler.inverse_transform(prim.reshape(-1, base_dim))
-            prim = prim.reshape(n_envs, fs, base_dim).transpose(1, 0, 2)
+            # reshape to (E * fs, base_dim), inverse-transform, reshape to (fs, E, base_dim)
+            prim = eff.reshape(n_envs * fs, base_dim)
+            prim = scaler.inverse_transform(prim)
+            prim = prim.reshape(fs, n_envs, base_dim)
         else:
             base_dim = eff.shape[-1]
             if self._frameskip is None:
@@ -265,26 +151,6 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         # queue steps 1..fs-1; return step 0 immediately
         for t in range(1, fs):
             self._action_queue.append(prim[t])   # (E, base_dim)
-
-        # Compute total plan calls once frameskip is known.
-        if self._n_plan_total is None and self._eval_budget is not None:
-            self._n_plan_total = max(1, self._eval_budget // self._frameskip)
-
-        if self._plan_step % self._log_every == 0:
-            elapsed = time.time() - self._t_start
-            st = self._plan_stats
-            avg_s = st.get("total_ms", 0.0) / self._plan_step / 1000.0
-            total_str = f"/{self._n_plan_total}" if self._n_plan_total is not None else ""
-            dist_str = ""
-            if "emb_init" in st and "emb_prev" in st:
-                dist_str = (
-                    f"  emb_dist {float(st['emb_init']):.3f}"
-                    f"→{float(st['emb_prev']):.3f}"
-                )
-            py_log.info(
-                "plan_step %3d%s  elapsed %5.0fs  avg_plan %.1fs/call%s",
-                self._plan_step, total_str, elapsed, avg_s, dist_str,
-            )
 
         return prim[0]   # (E, base_dim)
 
@@ -371,20 +237,13 @@ def run(cfg: DictConfig):
     py_log.info("Loading checkpoint from %s", cfg.checkpoint)
     model = torch.load(cfg.checkpoint, map_location=cfg.device, weights_only=False)
 
-    if cfg.get("random_policy", False):
-        py_log.info("DIAGNOSTIC: using RandomPolicy (planner disabled)")
-        policy = swm.policy.RandomPolicy()
-    else:
-        policy = HierarchicalPolicy(
-            model=model,
-            plan_cfg=cfg.plan,
-            process=process,
-            transform=transform,
-            device=cfg.device,
-            extra_device=cfg.get("extra_device", None),
-            compile_planner=cfg.get("compile_planner", False),
-            eval_budget=cfg.eval.eval_budget,
-        )
+    policy = HierarchicalPolicy(
+        model=model,
+        plan_cfg=cfg.plan,
+        process=process,
+        transform=transform,
+        device=cfg.device,
+    )
 
     ##########################
     ##     episode sample   ##
@@ -428,12 +287,10 @@ def run(cfg: DictConfig):
     results_path = Path(cfg.checkpoint).parent
 
     py_log.info(
-        "Evaluating %d episodes × %d-step budget  "
-        "[H=%d h=%d oi=%d ii=%d outer_std=%.1f inner_std=%.1f]",
+        "Evaluating %d episodes × %d-step budget  [H=%d h=%d oi=%d ii=%d]",
         cfg.eval.num_eval, cfg.eval.eval_budget,
         cfg.plan.H_high, cfg.plan.h_low,
         cfg.plan.outer_iters, cfg.plan.inner_iters,
-        cfg.plan.get("outer_std", 5.0), cfg.plan.get("inner_std", 1.0),
     )
 
     t0 = time.time()
@@ -452,8 +309,6 @@ def run(cfg: DictConfig):
     py_log.info("evaluation time: %.1f s", elapsed)
 
     # Per-episode breakdown: does success correlate with starting near the goal?
-    # If successes are concentrated at small init_dist, the 20% is "free" (the planner
-    # isn't earning it) — points to a model/execution problem rather than weak search.
     succ = np.asarray(metrics.get("episode_successes"))
     if init_dist is not None and succ is not None and succ.shape == init_dist.shape:
         order = np.argsort(init_dist)
