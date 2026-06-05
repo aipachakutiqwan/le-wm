@@ -14,6 +14,13 @@ from sklearn import preprocessing
 from torchvision.transforms import v2 as transforms
 import stable_worldmodel as swm
 
+import sys
+# traj_recording.py now lives in qualitative analysis/path_trajectories/ — add that
+# folder to sys.path (parent dir name has a space, so no clean package import).
+sys.path.insert(0, str(Path(__file__).resolve().parent / "qualitative analysis" / "path_trajectories"))
+from traj_recording import RecordingPolicy, save_trajectories_npz
+
+
 def img_transform(cfg):
     transform = transforms.Compose(
         [
@@ -136,6 +143,10 @@ def run(cfg: DictConfig):
     if len(eval_episodes) < cfg.eval.num_eval:
         raise ValueError("Not enough episodes with sufficient length for evaluation.")
 
+    # --- trajectory recording (opt-in; default off keeps baseline eval intact) ---
+    if cfg.get("record_trajectories", False):
+        policy = RecordingPolicy(policy)
+
     world.set_policy(policy)
 
     start_time = time.time()
@@ -151,6 +162,19 @@ def run(cfg: DictConfig):
     end_time = time.time()
     
     print(metrics)
+
+    # --- trajectory recording: dump paths + start/goal next to the results file ---
+    if cfg.get("record_trajectories", False):
+        start_proprio = np.asarray(dataset.get_row_data(random_episode_indices)["pos_agent"])
+        goal_proprio = np.asarray(
+            dataset.get_row_data(random_episode_indices + cfg.eval.goal_offset_steps)["pos_agent"]
+        )
+        npz = save_trajectories_npz(
+            results_path / cfg.get("traj_npz", "trajectories_flat.npz"),
+            policy, metrics, eval_episodes, eval_start_idx,
+            start_proprio=start_proprio, goal_proprio=goal_proprio,
+        )
+        print(f"trajectories saved to {npz}")
 
     # ── Build a meaningful filename from hyperparameters + success rate ───────
     sr = None
