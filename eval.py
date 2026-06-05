@@ -176,19 +176,41 @@ def run(cfg: DictConfig):
         )
         print(f"trajectories saved to {npz}")
 
-    results_path = results_path / cfg.output.filename
+    # ── Build a meaningful filename from hyperparameters + success rate ───────
+    sr = None
+    if isinstance(metrics, dict):
+        for k in ("success_rate", "sr", "success"):
+            if k in metrics:
+                sr = float(metrics[k])
+                break
+
+    parts = [cfg.dataset.get("name", "env")]
+    if hasattr(cfg, "plan"):
+        parts += [
+            f"H{cfg.plan.H_high}",
+            f"h{cfg.plan.h_low}",
+            f"oi{cfg.plan.outer_iters}",
+            f"ii{cfg.plan.inner_iters}",
+        ]
+    parts += [f"n{cfg.eval.num_eval}", f"seed{cfg.seed}"]
+    if sr is not None:
+        parts.append(f"sr{sr:.3f}".replace(".", "p"))
+
+    filename = "_".join(parts) + ".txt"
+    results_path = results_path / filename
     results_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Saving results to {results_path}")
 
-    with results_path.open("a") as f:
-        f.write("\n")  # separate from previous runs
-
+    with results_path.open("w") as f:
         f.write("==== CONFIG ====\n")
         f.write(OmegaConf.to_yaml(cfg))
         f.write("\n")
 
         f.write("==== RESULTS ====\n")
         f.write(f"metrics: {metrics}\n")
-        f.write(f"evaluation_time: {end_time - start_time} seconds\n")
+        if sr is not None:
+            f.write(f"success_rate: {sr:.4f}\n")
+        f.write(f"evaluation_time: {end_time - start_time:.1f} seconds\n")
 
 
 if __name__ == "__main__":

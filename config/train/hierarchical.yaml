@@ -17,13 +17,24 @@ encoder_scale: tiny
 
 train_split: 0.9
 
-device: cuda 
+device: cuda
+
+# Number of GPUs to use. Set to 2 for two-GPU DDP via Lightning (no torchrun needed).
+# Lightning replaces the DataLoader sampler with DistributedSampler automatically.
+# The embedding cache is always built in the main process; use cache_extra_device for speed.
+num_gpus: 1
+ddp_port: 29500   # NCCL rendezvous port; change if 29500 is already in use
+
+cache_batch_size: 1024   # batch size for the one-time embedding cache pass; increase to saturate VRAM
+# Used only when num_gpus=1. Set to "cuda:1" to split the embedding cache across 2 GPUs via
+# threading (~2× faster). Ignored when num_gpus=2 (DDP handles the split automatically).
+cache_extra_device: null
 
 loader:
-  batch_size: 64
-  num_workers: 6
+  batch_size: 1024   # per-GPU effective = batch_size / num_gpus; doubled for 2-GPU runs
+  num_workers: 8
   persistent_workers: True
-  prefetch_factor: 3
+  prefetch_factor: 4
   pin_memory: True
 
 # Stage-2 optimisation
@@ -37,7 +48,7 @@ stage2:
   # teacher forcing (original behaviour). When True, the teacher-forcing probability is
   # annealed ss_start -> ss_end over epochs so P^(2) is trained on its own rollouts and
   # penalised for compounding error (the fix for the H>=2 fidelity collapse).
-  rollout_loss: False
+  rollout_loss: True
   ss_start: 1.0           # teacher-forcing prob at epoch 0 (1.0 = fully teacher-forced)
   ss_end: 0.25            # teacher-forcing prob at final epoch (0.0 = full free-running)
   # Regularisation for A_ψ / P^(2) (held-out TF loss 0.84 vs train 0.17 -> overfitting).
@@ -48,6 +59,8 @@ stage2:
   # ar_every=1 if selecting by "ar").
   select_by: tf
   ar_every: 5             # run the (expensive) free-running AR val pass every N epochs
+  use_amp: True           # bf16 autocast on CUDA — ~2x throughput, no grad scaler needed
+  compile: False          # torch.compile A_ψ and P^(2); set True for long production runs
 
 # HierarchicalLeWM architecture.
 # num_preds is required by the data config group's num_steps interpolation.
@@ -58,7 +71,7 @@ wm:
   n_waypoints: 4          # N interior waypoints (6 total with endpoints, matches PLDM B.4)
   latent_action_dim: 8    # d_L — matches PLDM B.4; wider bottleneck for action info
   lambda_var: 0.0         # hinge variance penalty on macro-actions (0 = disabled; superseded by lambda_kl)
-  lambda_kl: 0.01         # moment-matching to N(0,I) on A_ψ outputs: mean²+(std-1)²
+  lambda_kl: 0.03         # moment-matching to N(0,I) on A_ψ outputs: mean²+(std-1)²
   high_depth: 6
   high_heads: 16
   high_mlp_dim: 2048
@@ -76,6 +89,6 @@ wandb:
   config:
     entity: lewm
     project: lewm
-    name: ${output_model_name}
+    name: ${data.dataset.name}_wp${wm.n_waypoints}_dL${wm.latent_action_dim}_lr${stage2.lr}_kl${wm.lambda_kl}_bs${loader.batch_size}_ep${stage2.n_epochs}_rl${stage2.rollout_loss}
     id: ${subdir}
     resume: allow

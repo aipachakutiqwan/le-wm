@@ -391,3 +391,17 @@ python plan_hierarchical.py \
 
 
 
+### Hierarchical run:
+
+Cube:
+
+```bash
+export STABLEWM_HOME="/var/cs231n/lewm-cube"
+python train_hierarchical.py data=ogb stage1_checkpoint=$STABLEWM_HOME/lewm_paper_object.ckpt  wandb.config.entity=florenciopaucar-uni stage2.n_epochs=20 stage2.rollout_loss=True wm.lambda_kl=0.03 num_gpus=2 
+```
+
+```bash
+export STABLEWM_HOME="/var/cs231n/lewm-cube"
+python plan_hierarchical.py checkpoint=$STABLEWM_HOME/20260602_211303/hierarchical_lewm_best_object.ckpt device=cuda --config-name=hierarchical_cube
+
+```

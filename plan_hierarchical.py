@@ -56,27 +56,32 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
 
     Parameters
     ----------
-    model      : trained HierarchicalLeWM
-    plan_cfg   : OmegaConf node with H_high / h_low / *_samples / *_iters
-    process    : dict of sklearn-style column normalisers (same as eval.py)
-    transform  : dict of torchvision image transforms keyed by obs key
-    device     : torch device string
+    model       : trained HierarchicalLeWM
+    plan_cfg    : OmegaConf node with H_high / h_low / *_samples / *_iters
+    process     : dict of sklearn-style column normalisers (same as eval.py)
+    transform   : dict of torchvision image transforms keyed by obs key
+    device      : torch device string
+    eval_budget : primitive-step budget per episode; used to compute total plan steps
     """
 
-    def __init__(self, model, plan_cfg, process, transform, device):
+    def __init__(self, model, plan_cfg, process, transform, device, eval_budget: int | None = None):
         super().__init__()
         self.model = model.eval().to(device)
         self.plan_cfg = plan_cfg
         self.process = process
         self.transform = transform
         self.device = device
+        self._eval_budget = eval_budget
         self._action_queue: deque = deque()
-        # effective_action_dim = frameskip * base_action_dim; derived at first get_action call
         self._frameskip: int | None = None
+        self._plan_step: int = 0
+        self._total_plan_steps: int | None = None
 
     def set_env(self, env) -> None:
         self.env = env
         self._action_queue.clear()
+        self._plan_step = 0
+        self._total_plan_steps = None
 
     def _encode(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode pixel tensor to latent states.
@@ -113,6 +118,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
         if self._action_queue:
             return self._action_queue.popleft()
 
+        self._plan_step += 1
         info_dict = self._prepare_info(info_dict)
 
         # after _prepare_info: pixels / goal are (E, T, C, H, W) tensors
@@ -121,6 +127,7 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
 
         n_envs = z_init.shape[0]
         effective_actions = []
+        t0 = time.perf_counter()
         for i in range(n_envs):
             a = plan(
                 self.model,
@@ -134,8 +141,10 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
                 inner_iters=self.plan_cfg.inner_iters,
                 outer_std=self.plan_cfg.get("outer_std", 5.0),
                 inner_std=self.plan_cfg.get("inner_std", 1.0),
+                step=self._plan_step,
             )
             effective_actions.append(a.cpu().numpy())
+        elapsed_ms = (time.perf_counter() - t0) * 1e3
 
         # effective_actions: list of (effective_action_dim,) → stack to (E, eff_dim)
         eff = np.stack(effective_actions)
@@ -145,11 +154,13 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             base_dim = scaler.n_features_in_
             if self._frameskip is None:
                 self._frameskip = eff.shape[-1] // base_dim
+                if self._eval_budget is not None:
+                    self._total_plan_steps = self._eval_budget // self._frameskip
             fs = self._frameskip
-            # eff[e] is [prim_0, prim_1, ..., prim_{fs-1}] concatenated. Split per env
-            # first (E, fs, base), inverse-transform per row, then transpose to
-            # (fs, E, base) so prim[t, e] is env e's t-th primitive. Reshaping straight
-            # from (E*fs, base) to (fs, E, base) scrambles primitives across envs.
+            # eff[e] = [prim_0, prim_1, ..., prim_{fs-1}] concatenated (env-major layout).
+            # Reshape to (E, fs, base), inverse-transform, then transpose to (fs, E, base)
+            # so prim[t, e] = primitive t for env e.  A flat reshape to (E*fs, base) then
+            # reshape(fs, E, base) would interleave envs and primitives incorrectly.
             prim = eff.reshape(n_envs, fs, base_dim)
             prim = scaler.inverse_transform(prim.reshape(-1, base_dim))
             prim = prim.reshape(n_envs, fs, base_dim).transpose(1, 0, 2)
@@ -157,8 +168,17 @@ class HierarchicalPolicy(swm.policy.BasePolicy):
             base_dim = eff.shape[-1]
             if self._frameskip is None:
                 self._frameskip = 1
+                if self._eval_budget is not None:
+                    self._total_plan_steps = self._eval_budget // self._frameskip
             fs = self._frameskip
             prim = eff.reshape(fs, n_envs, base_dim)
+
+        step_str = (
+            f"{self._plan_step}/{self._total_plan_steps}"
+            if self._total_plan_steps is not None
+            else str(self._plan_step)
+        )
+        py_log.info("plan step %s — %d env(s) — %.0f ms", step_str, n_envs, elapsed_ms)
 
         # queue steps 1..fs-1; return step 0 immediately
         for t in range(1, fs):
@@ -259,6 +279,7 @@ def run(cfg: DictConfig):
             process=process,
             transform=transform,
             device=cfg.device,
+            eval_budget=cfg.eval.eval_budget,
         )
 
     ##########################
@@ -276,7 +297,7 @@ def run(cfg: DictConfig):
 
     rng = np.random.default_rng(cfg.seed)
     chosen = np.sort(
-        valid_idx[rng.choice(len(valid_idx) - 1, size=cfg.eval.num_eval, replace=False)]
+        valid_idx[rng.choice(len(valid_idx), size=cfg.eval.num_eval, replace=False)]
     )
 
     eval_episodes = dataset.get_row_data(chosen)[col_name]
@@ -285,11 +306,15 @@ def run(cfg: DictConfig):
     if len(eval_episodes) < cfg.eval.num_eval:
         raise ValueError("Not enough episodes with sufficient length for evaluation.")
 
-    # Initial agent-to-goal distance per episode. Goal is the demo's pos_agent
-    # goal_offset_steps later (same episode — guaranteed by the max_start filter).
-    start_pos = np.asarray(dataset.get_row_data(chosen)["pos_agent"])
-    goal_pos = np.asarray(dataset.get_row_data(chosen + cfg.eval.goal_offset_steps)["pos_agent"])
-    init_dist = np.linalg.norm(start_pos - goal_pos, axis=-1)
+    # Initial agent-to-goal distance per episode (tworoom diagnostic).
+    # Uses pos_agent when available; silently skipped for envs that don't expose it.
+    _dist_col = cfg.eval.get("dist_col", "pos_agent")
+    if _dist_col in dataset.column_names:
+        start_pos = np.asarray(dataset.get_row_data(chosen)[_dist_col])
+        goal_pos = np.asarray(dataset.get_row_data(chosen + cfg.eval.goal_offset_steps)[_dist_col])
+        init_dist = np.linalg.norm(start_pos - goal_pos, axis=-1)
+    else:
+        init_dist = None
 
     ##########################
     ##      evaluation      ##
@@ -301,6 +326,13 @@ def run(cfg: DictConfig):
 
     world.set_policy(policy)
     results_path = Path(cfg.checkpoint).parent
+
+    py_log.info(
+        "Evaluating %d episodes × %d-step budget  [H=%d h=%d oi=%d ii=%d]",
+        cfg.eval.num_eval, cfg.eval.eval_budget,
+        cfg.plan.H_high, cfg.plan.h_low,
+        cfg.plan.outer_iters, cfg.plan.inner_iters,
+    )
 
     t0 = time.time()
     metrics = world.evaluate_from_dataset(
@@ -327,10 +359,8 @@ def run(cfg: DictConfig):
         py_log.info("trajectories saved to %s", npz)
 
     # Per-episode breakdown: does success correlate with starting near the goal?
-    # If successes are concentrated at small init_dist, the 20% is "free" (the planner
-    # isn't earning it) — points to a model/execution problem rather than weak search.
     succ = np.asarray(metrics.get("episode_successes"))
-    if succ is not None and succ.shape == init_dist.shape:
+    if init_dist is not None and succ is not None and succ.shape == init_dist.shape:
         order = np.argsort(init_dist)
         py_log.info("per-episode (sorted by initial distance to goal):")
         for j in order:
@@ -341,9 +371,21 @@ def run(cfg: DictConfig):
                         float(init_dist[succ].mean()),
                         float(init_dist[~succ].mean()) if (~succ).any() else float("nan"))
 
-    out = results_path / cfg.output.filename
+    sr = float(np.mean(succ)) if (succ is not None and succ.ndim > 0) else float("nan")
+    env_tag = cfg.world.env_name.replace("/", "_")
+    ckpt_path = Path(cfg.checkpoint)
+    auto_name = (
+        f"{env_tag}_H{cfg.plan.H_high}_h{cfg.plan.h_low}"
+        f"_oi{cfg.plan.outer_iters}_ii{cfg.plan.inner_iters}"
+        f"_n{cfg.eval.num_eval}_seed{cfg.seed}_sr{sr:.3f}"
+        f"_{ckpt_path.parent.name}_{ckpt_path.stem}.txt"
+    )
+    out = results_path / (cfg.output.get("filename") or auto_name)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("a") as f:
+        f.write("\n==== MODEL ====\n")
+        f.write(f"checkpoint_folder: {ckpt_path.parent}\n")
+        f.write(f"checkpoint_name:   {ckpt_path.name}\n")
         f.write("\n==== CONFIG ====\n")
         f.write(OmegaConf.to_yaml(cfg))
         f.write("\n==== RESULTS ====\n")

@@ -9,9 +9,14 @@ they directly use its weights; planning logic that is independent of model
 parameters lives here.
 """
 
+import logging
+import time
+
 import torch
 
 from hierarchical_lewm import HierarchicalLeWM
+
+py_log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -43,7 +48,8 @@ def cem(
     (*shape,) optimised mean
     """
     n_elites = max(1, int(n_samples * elite_frac))
-    for _ in range(n_iters):
+    for i in range(n_iters):
+        t_iter = time.perf_counter()
         eps = torch.randn(n_samples, *mu.shape, device=mu.device)
         candidates = mu.unsqueeze(0) + std.unsqueeze(0) * eps   # (S, *shape)
         costs = cost_fn(candidates)                              # (S,)
@@ -51,6 +57,11 @@ def cem(
         elites = candidates[elite_idx]
         mu = elites.mean(0)
         std = elites.std(0).clamp(min=0.1)
+        py_log.debug(
+            "  cem iter %d/%d  best_cost=%.4f  std_mean=%.3f  %.1f ms",
+            i + 1, n_iters, costs[elite_idx[0]].item(), std.mean().item(),
+            (time.perf_counter() - t_iter) * 1e3,
+        )
     return mu
 
 
@@ -72,6 +83,7 @@ def plan(
     inner_iters: int = 5,
     outer_std: float = 5.0,
     inner_std: float = 1.0,
+    step: int | None = None,
 ) -> torch.Tensor:
     """Two-level CEM-MPC. Returns the first primitive action to execute.
 
@@ -104,6 +116,8 @@ def plan(
     inner_std      : initial CEM std for the inner (primitive-action) loop. Must
                      roughly match the dataset action scale (StandardScaler-normalised
                      actions have std~1.0); too small starves the search of exploration.
+    step           : MPC step index — logged as a prefix on every info/debug line so
+                     per-call output is traceable across a long eval run.
 
     Returns
     -------
@@ -111,6 +125,8 @@ def plan(
     """
     device = z_init.device
     d_L = model.latent_action_dim
+    step_tag = f"step={step}  " if step is not None else ""
+    t0 = time.perf_counter()
 
     # ── Outer CEM: optimise macro-action sequence ─────────────────────────────
     mu_mac = torch.zeros(H_high, d_L, device=device)
@@ -122,11 +138,15 @@ def plan(
         z_last = subgoals[:, -1]                               # (S, D)
         return (z_last - z_goal.unsqueeze(0)).abs().sum(-1)    # (S,)
 
+    t_outer = time.perf_counter()
     best_mac = cem(outer_cost, mu_mac, std_mac, outer_samples, outer_iters)
-    # best_mac: (H_high, d_L)
+    outer_ms = (time.perf_counter() - t_outer) * 1e3
+    py_log.info("%souter CEM — best_cost=%.4f  %.1f ms",
+                step_tag, outer_cost(best_mac.unsqueeze(0)).item(), outer_ms)
 
     # ── Derive first subgoal ──────────────────────────────────────────────────
     z_sg = model._rollout_high(z_init, best_mac.unsqueeze(0))[:, 0].squeeze(0)  # (D,)
+    py_log.debug("%ssubgoal — z_sg→z_goal L1=%.4f", step_tag, (z_goal - z_sg).abs().sum().item())
 
     # ── Inner CEM: optimise primitive actions to reach z_sg ──────────────────
     mu_act = torch.zeros(h_low, model.action_dim, device=device)
@@ -137,7 +157,13 @@ def plan(
         z_final = model._rollout_low(z_init, candidates)       # (S, D)
         return (z_final - z_sg.unsqueeze(0)).abs().sum(-1)     # (S,)
 
+    t_inner = time.perf_counter()
     best_act = cem(inner_cost, mu_act, std_act, inner_samples, inner_iters)
-    # best_act: (h_low, action_dim)
+    inner_ms = (time.perf_counter() - t_inner) * 1e3
+    total_ms = (time.perf_counter() - t0) * 1e3
+    py_log.info(
+        "%sinner CEM — best_cost=%.4f  %.1f ms  |  total=%.1f ms",
+        step_tag, inner_cost(best_act.unsqueeze(0)).item(), inner_ms, total_ms,
+    )
 
     return best_act[0]   # first primitive action: (action_dim,)

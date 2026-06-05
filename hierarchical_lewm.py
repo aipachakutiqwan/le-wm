@@ -10,6 +10,9 @@ New components (jepa.py and module.py are not modified):
 See hierarchical_plan.py for the two-level CEM-MPC planner.
 """
 
+import logging
+import time
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -17,6 +20,8 @@ from torch import nn
 from jepa import JEPA
 from module import ARPredictor
 from waypoint_sampler import sample_waypoints_fixed_stride
+
+py_log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -276,6 +281,16 @@ class HierarchicalLeWM(nn.Module):
         self.jepa.eval()
         return self
 
+    def forward(
+        self,
+        obs: dict,
+        waypoint_idx: torch.Tensor,
+        freeze_encoder: bool = True,
+        teacher_forcing_prob: float = 1.0,
+    ) -> dict:
+        """Route through forward_high so DDP.forward() fires and gradient all-reduce is set up."""
+        return self.forward_high(obs, waypoint_idx, freeze_encoder, teacher_forcing_prob)
+
     # ── Stage-1 forward ──────────────────────────────────────────────────────
 
     def forward_low(self, obs: dict) -> dict:
@@ -314,24 +329,27 @@ class HierarchicalLeWM(nn.Module):
         -------
         dict with 'loss' (scalar), 'high_pred_emb', 'high_target_emb'
         """
-        pixels = obs["pixels"]                              # (B, T, C, H, W)
         actions = torch.nan_to_num(obs["action"], 0.0)     # (B, T, action_dim)
 
-        grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
-        with grad_ctx:
-            emb = self.jepa.encode({"pixels": pixels})["emb"]  # (B, T, embed_dim)
+        if "emb" in obs:
+            # Fast path: pre-computed embeddings from the cache (no ViT forward pass).
+            emb = obs["emb"]                                # (B, T, embed_dim)
+        else:
+            pixels = obs["pixels"]                          # (B, T, C, H, W)
+            grad_ctx = torch.no_grad() if freeze_encoder else torch.enable_grad()
+            with grad_ctx:
+                emb = self.jepa.encode({"pixels": pixels})["emb"]
 
         W = len(waypoint_idx)
         wp_emb = emb[:, waypoint_idx]      # (B, W, embed_dim)
 
         # A_ψ: encode each inter-waypoint action chunk → one macro-action
         n_seg = W - 1
+        boundaries = waypoint_idx.tolist()   # one transfer; avoids per-element CUDA syncs
         macro_list = []
         for k in range(n_seg):
-            s = int(waypoint_idx[k])
-            e = int(waypoint_idx[k + 1])
-            chunk = actions[:, s:e]                              # (B, chunk_len, A)
-            macro_list.append(self.action_encoder_high(chunk))  # (B, d_L)
+            chunk = actions[:, boundaries[k] : boundaries[k + 1]]   # (B, chunk_len, A)
+            macro_list.append(self.action_encoder_high(chunk))       # (B, d_L)
 
         macro_actions = torch.stack(macro_list, dim=1)   # (B, n_seg, d_L)
 
@@ -349,7 +367,7 @@ class HierarchicalLeWM(nn.Module):
                 preds.append(pred_next)                       # predict z_{k+1}
                 if k < n_seg - 1:
                     use_true = (
-                        torch.rand(pixels.shape[0], 1, 1, device=hist.device)
+                        torch.rand(emb.shape[0], 1, 1, device=hist.device)
                         < teacher_forcing_prob
                     )
                     next_in = torch.where(use_true, wp_emb[:, k + 1:k + 2], pred_next)
@@ -465,6 +483,8 @@ def train_hierarchical_lewm(
     weight_decay: float = 0.01,
     select_by: str = "tf",
     ar_every: int = 5,
+    use_amp: bool = True,
+    compile_model: bool = False,
 ) -> HierarchicalLeWM:
     """Jointly optimise A_ψ and P^(2) on L_tf (stage 2).
 
@@ -505,17 +525,27 @@ def train_hierarchical_lewm(
                           convention as stage-1)
     """
     model = model.to(device)
+    # Unwrap DistributedDataParallel so we can access sub-modules directly for
+    # compile, optimizer param collection, and encoder freezing.
+    raw_model = model.module if hasattr(model, "module") else model
+
+    if compile_model:
+        raw_model.action_encoder_high = torch.compile(raw_model.action_encoder_high)
+        raw_model.high_predictor = torch.compile(raw_model.high_predictor)
+
+    device_type = device.split(":")[0]   # "cuda", "cpu", or "mps"
+    amp_enabled = use_amp and device_type == "cuda"
 
     # only the two new modules are optimised in stage 2
     stage2_params = (
-        list(model.action_encoder_high.parameters())
-        + list(model.high_predictor.parameters())
+        list(raw_model.action_encoder_high.parameters())
+        + list(raw_model.high_predictor.parameters())
     )
     optimizer = torch.optim.AdamW(stage2_params, lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs)
 
     if freeze_encoder:
-        for p in model.jepa.parameters():
+        for p in raw_model.jepa.parameters():
             p.requires_grad_(False)
 
     model.train()
@@ -524,13 +554,20 @@ def train_hierarchical_lewm(
     best_epoch = None
     best_ckpt_path = None
     best_metrics = None
-    # Checkpoint-selection metric: "ar" = free-running rollout MSE (matches how the planner
-    # uses P²); "tf" = teacher-forced val loss (legacy). AR is the recommended default.
     if select_by not in ("ar", "tf"):
         raise ValueError(f"select_by must be 'ar' or 'tf', got {select_by!r}")
     sel_key = "stage2/val_loss_ar_pred" if select_by == "ar" else "stage2/val_loss"
+
+    t_train = time.perf_counter()
+    py_log.info(
+        "stage-2 training start — epochs=%d  steps/epoch=%d  device=%s  amp=%s  compile=%s",
+        n_epochs, len(dataloader), device, amp_enabled, compile_model,
+    )
+
     for epoch in range(n_epochs):
-        # Scheduled sampling: anneal teacher-forcing prob ss_start -> ss_end over epochs.
+        if hasattr(dataloader.sampler, "set_epoch"):
+            dataloader.sampler.set_epoch(epoch)
+
         if rollout_loss:
             frac = epoch / max(1, n_epochs - 1)
             tf_prob = ss_start + (ss_end - ss_start) * frac
@@ -539,41 +576,62 @@ def train_hierarchical_lewm(
 
         epoch_loss = epoch_pred = epoch_var = epoch_kl = 0.0
         epoch_mac_absmean = epoch_mac_std = 0.0
+        epoch_step_ms = 0.0
+        t_epoch = time.perf_counter()
+
+        # wp_idx is the same for every batch (T is fixed by stage2_num_steps).
+        # Compute on CPU once per epoch to avoid repeated CUDA allocations.
+        _wp_idx_cache: torch.Tensor | None = None
+
         for batch in dataloader:
+            t_step = time.perf_counter()
             batch = {
-                k: v.to(device) if torch.is_tensor(v) else v
+                k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v
                 for k, v in batch.items()
             }
-            T = batch["pixels"].shape[1]
-            wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
+            # Use action length for T — works with both pixel and embedding-cache batches.
+            T = batch["action"].shape[1]
+            if _wp_idx_cache is None:
+                _wp_idx_cache = sample_waypoints_fixed_stride(T, N=n_waypoints, device="cpu")
+            wp_idx = _wp_idx_cache
 
-            out = model.forward_high(
-                batch, wp_idx, freeze_encoder=freeze_encoder,
-                teacher_forcing_prob=tf_prob,
-            )
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
+                out = model(
+                    batch, wp_idx, freeze_encoder=freeze_encoder,
+                    teacher_forcing_prob=tf_prob,
+                )
 
             optimizer.zero_grad()
             out["loss"].backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(stage2_params, float("inf"))
             optimizer.step()
 
+            step_ms = (time.perf_counter() - t_step) * 1e3
+            B = batch["action"].shape[0]
+            samp_s = B / (step_ms / 1e3)
+
             loss_val = out["loss"].item()
             pred_val = out["loss_pred"].item()
             var_val  = out["loss_var"].item()
             kl_val   = out["loss_kl"].item()
-            # A_ψ macro-action distribution vs the planner's N(0,1) prior — what the KL
-            # term actually steers. |mean| → 0 and std → 1 means the moment-matching worked.
             with torch.no_grad():
-                mac = out["macro_actions"]                       # (B, n_seg, d_L)
+                mac = out["macro_actions"]
                 mac_absmean = mac.mean(dim=(0, 1)).abs().mean().item()
                 mac_std = mac.std(dim=(0, 1)).mean().item()
+
             epoch_loss += loss_val
             epoch_pred += pred_val
             epoch_var  += var_val
             epoch_kl   += kl_val
             epoch_mac_absmean += mac_absmean
             epoch_mac_std     += mac_std
+            epoch_step_ms     += step_ms
             global_step += 1
+
+            py_log.debug(
+                "step %d  loss=%.4f  pred=%.4f  kl=%.4f  gnorm=%.3f  %.1f ms  %.0f samp/s",
+                global_step, loss_val, pred_val, kl_val, grad_norm.item(), step_ms, samp_s,
+            )
 
             if wandb_run is not None and global_step % log_every_n_steps == 0:
                 wandb_run.log({
@@ -584,67 +642,71 @@ def train_hierarchical_lewm(
                     "stage2/macro_absmean": mac_absmean,
                     "stage2/macro_std":     mac_std,
                     "stage2/grad_norm":     grad_norm.item(),
+                    "stage2/step_ms":       step_ms,
+                    "stage2/samples_per_sec": samp_s,
                 }, step=global_step)
 
         n = len(dataloader)
+        epoch_s = time.perf_counter() - t_epoch
+        avg_step_ms = epoch_step_ms / n
         epoch_metrics = {
-            "stage2/epoch_loss":         epoch_loss / n,
-            "stage2/epoch_loss_pred":    epoch_pred / n,
-            "stage2/epoch_loss_var":     epoch_var  / n,
-            "stage2/epoch_loss_kl":      epoch_kl   / n,
+            "stage2/epoch_loss":          epoch_loss / n,
+            "stage2/epoch_loss_pred":     epoch_pred / n,
+            "stage2/epoch_loss_var":      epoch_var  / n,
+            "stage2/epoch_loss_kl":       epoch_kl   / n,
             "stage2/epoch_macro_absmean": epoch_mac_absmean / n,
             "stage2/epoch_macro_std":     epoch_mac_std / n,
-            "stage2/epoch":              epoch + 1,
-            "stage2/tf_prob":            tf_prob,
-            "stage2/lr":                 scheduler.get_last_lr()[0],
+            "stage2/epoch":               epoch + 1,
+            "stage2/tf_prob":             tf_prob,
+            "stage2/lr":                  scheduler.get_last_lr()[0],
+            "stage2/epoch_s":             epoch_s,
+            "stage2/avg_step_ms":         avg_step_ms,
         }
         scheduler.step()
 
         val_str = ""
         if val_dataloader is not None and len(val_dataloader) > 0:
-            # The free-running AR pass is a sequential rollout (expensive); run it only
-            # every ar_every epochs and on the final epoch. The teacher-forced val loss
-            # (the default selection metric) is computed every epoch.
             run_ar = ((epoch + 1) % max(1, ar_every) == 0) or (epoch + 1 == n_epochs)
+            t_val = time.perf_counter()
             val_metrics = _validate_hierarchical(
                 model, val_dataloader, n_waypoints, freeze_encoder, device,
-                run_ar=run_ar,
+                run_ar=run_ar, device_type=device_type, amp_enabled=amp_enabled,
             )
+            val_s = time.perf_counter() - t_val
             epoch_metrics.update(val_metrics)
+            epoch_metrics["stage2/val_s"] = val_s
             ar_str = (
-                f"val_ar: {val_metrics['stage2/val_loss_ar_pred']:.5f}  "
+                f"val_ar={val_metrics['stage2/val_loss_ar_pred']:.5f}  "
                 if "stage2/val_loss_ar_pred" in val_metrics else ""
             )
             val_str = (
-                f"  | val_loss: {val_metrics['stage2/val_loss']:.5f}  "
+                f"  val={val_metrics['stage2/val_loss']:.5f}  "
                 f"{ar_str}"
-                f"val_kl: {val_metrics['stage2/val_loss_kl']:.5f}  "
-                f"val_var: {val_metrics['stage2/val_loss_var']:.5f}"
+                f"val_kl={val_metrics['stage2/val_loss_kl']:.5f}  "
+                f"({val_s:.1f}s)"
             )
 
-            # Track the best model by the selection metric (`select_by`); keep one stable
-            # checkpoint on disk and defer the (single) W&B artifact upload to end of run.
-            # If selecting by AR on an epoch where AR was skipped, sel_key is absent, so
-            # that epoch simply isn't a candidate.
             if sel_key in val_metrics and val_metrics[sel_key] < best_val_loss and ckpt_callback is not None:
                 best_val_loss = val_metrics[sel_key]
                 best_epoch = epoch + 1
                 best_metrics = dict(val_metrics)
-                best_ckpt_path = ckpt_callback.save_best(model)
-                val_str += f"  (new best {select_by})"
+                best_ckpt_path = ckpt_callback.save_best(raw_model)
+                val_str += "  ★ best"
 
-        print(
-            f"epoch {epoch + 1}/{n_epochs}  "
-            f"loss: {epoch_loss/n:.5f}  pred: {epoch_pred/n:.5f}  "
-            f"kl: {epoch_kl/n:.5f}  var: {epoch_var/n:.5f}  "
-            f"macro(|mean|/std): {epoch_mac_absmean/n:.3f}/{epoch_mac_std/n:.3f}"
-            f"{val_str}"
+        py_log.info(
+            "epoch %d/%d  loss=%.5f  pred=%.5f  kl=%.5f  "
+            "mac(|μ|/σ)=%.3f/%.3f  lr=%.2e  %.1fs  %.1fms/step%s",
+            epoch + 1, n_epochs,
+            epoch_loss / n, epoch_pred / n, epoch_kl / n,
+            epoch_mac_absmean / n, epoch_mac_std / n,
+            scheduler.get_last_lr()[0], epoch_s, avg_step_ms,
+            val_str,
         )
         if wandb_run is not None:
             wandb_run.log(epoch_metrics, step=global_step)
 
         if ckpt_callback is not None:
-            ckpt_callback.save_epoch(model, epoch + 1)
+            ckpt_callback.save_epoch(raw_model, epoch + 1)
 
     if wandb_run is not None and best_ckpt_path is not None:
         import wandb
@@ -667,18 +729,23 @@ def train_hierarchical_lewm(
         if "stage2/val_loss_ar_pred" in best_metrics:
             wandb_run.summary["stage2/best_val_loss_ar_pred"] = best_metrics["stage2/val_loss_ar_pred"]
         wandb_run.summary["stage2/best_epoch"] = best_epoch
-        print(f"registered best model (epoch {best_epoch}, {select_by}={best_val_loss:.5f}) to W&B")
+        py_log.info(
+            "registered best model — epoch %d  %s=%.5f  to W&B",
+            best_epoch, select_by, best_val_loss,
+        )
 
+    total_s = time.perf_counter() - t_train
     if best_metrics is not None:
         ar_best = best_metrics.get("stage2/val_loss_ar_pred")
-        ar_best_str = f"val_ar: {ar_best:.5f}  " if ar_best is not None else ""
-        print(
-            f"best model ({select_by}) — epoch {best_epoch}/{n_epochs}  "
-            f"val_loss: {best_metrics['stage2/val_loss']:.5f}  "
-            f"{ar_best_str}"
-            f"val_kl: {best_metrics['stage2/val_loss_kl']:.5f}  "
-            f"ckpt: {best_ckpt_path}"
+        ar_str = f"  val_ar={ar_best:.5f}" if ar_best is not None else ""
+        py_log.info(
+            "training complete — %.1fs (%.1f min)  best epoch %d/%d  "
+            "val_loss=%.5f%s  ckpt=%s",
+            total_s, total_s / 60, best_epoch, n_epochs,
+            best_metrics["stage2/val_loss"], ar_str, best_ckpt_path,
         )
+    else:
+        py_log.info("training complete — %.1fs (%.1f min)", total_s, total_s / 60)
 
     return model
 
@@ -691,6 +758,8 @@ def _validate_hierarchical(
     freeze_encoder: bool,
     device: str,
     run_ar: bool = True,
+    device_type: str = "cuda",
+    amp_enabled: bool = False,
 ) -> dict:
     """Held-out teacher-forced loss, plus an optional free-running (AR) loss.
 
@@ -710,17 +779,22 @@ def _validate_hierarchical(
     model.eval()
     val_loss = val_pred = val_var = val_kl = 0.0
     ar_loss = ar_pred = 0.0
+    t_val_start = time.perf_counter()
+    _wp_idx_val: torch.Tensor | None = None
     for batch in val_dataloader:
         batch = {
-            k: v.to(device) if torch.is_tensor(v) else v
+            k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v
             for k, v in batch.items()
         }
-        T = batch["pixels"].shape[1]
-        wp_idx = sample_waypoints_fixed_stride(T, N=n_waypoints, device=device)
+        T = batch["action"].shape[1]
+        if _wp_idx_val is None:
+            _wp_idx_val = sample_waypoints_fixed_stride(T, N=n_waypoints, device="cpu")
+        wp_idx = _wp_idx_val
 
-        out = model.forward_high(
-            batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=1.0
-        )
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
+            out = model.forward_high(
+                batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=1.0
+            )
         val_loss += out["loss"].item()
         val_pred += out["loss_pred"].item()
         val_var  += out["loss_var"].item()
@@ -728,9 +802,10 @@ def _validate_hierarchical(
 
         if run_ar:
             # Free-running rollout: tf_prob=0.0 deterministically feeds back predictions.
-            out_ar = model.forward_high(
-                batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=0.0
-            )
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=amp_enabled):
+                out_ar = model.forward_high(
+                    batch, wp_idx, freeze_encoder=freeze_encoder, teacher_forcing_prob=0.0
+                )
             ar_loss += out_ar["loss"].item()
             ar_pred += out_ar["loss_pred"].item()
 
