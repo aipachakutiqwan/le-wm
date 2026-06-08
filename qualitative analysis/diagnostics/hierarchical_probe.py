@@ -21,7 +21,7 @@ frames with the model's frozen JEPA encoder.
 
 Usage
 -----
-python diagnostics/hierarchical_probe.py \
+python "qualitative analysis/diagnostics/hierarchical_probe.py" \
     --checkpoint /stablewm-home/.../hierarchical_lewm_object.ckpt \
     --dataset tworoom --device cuda
 
@@ -36,8 +36,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# repo root (parent of diagnostics/) holds hierarchical_plan, waypoint_sampler, etc.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# repo root (diagnostics -> qualitative analysis -> le-wm) holds hierarchical_plan, etc.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import stable_worldmodel as swm
 from sklearn import preprocessing

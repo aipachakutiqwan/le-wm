@@ -15,7 +15,7 @@ Offline: no environment, no planning loop — just encoder forward passes.
 Usage
 -----
 STABLEWM_HOME=$HOME/.stable_worldmodel \
-    .venv/bin/python diagnostics/cost_landscape.py \
+    .venv/bin/python "qualitative analysis/heat maps/cost_landscape.py" \
     --checkpoint baseline/tworoom/hierarchical_lewm_object.ckpt --device cuda
 """
 import argparse

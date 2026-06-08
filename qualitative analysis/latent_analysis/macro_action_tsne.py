@@ -21,7 +21,7 @@ Additive: the other diagnostics scripts and their outputs are untouched.
 Usage
 -----
 STABLEWM_HOME=/home/kaboo/.stable_worldmodel \
-python diagnostics/macro_action_tsne.py \
+python "qualitative analysis/latent_analysis/macro_action_tsne.py" \
     --checkpoint /home/kaboo/.stable_worldmodel/20260527_004340/hierarchical_lewm_object.ckpt \
     --device cuda
 """

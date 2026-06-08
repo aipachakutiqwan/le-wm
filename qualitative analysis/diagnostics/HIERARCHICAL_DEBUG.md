@@ -154,7 +154,7 @@ Hypotheses:
 
 ```bash
 STABLEWM_HOME=/path/to/cache \
-python diagnostics/hierarchical_probe.py \
+python "qualitative analysis/diagnostics/hierarchical_probe.py" \
     --checkpoint /stablewm-home/.../hierarchical_lewm_object.ckpt \
     --dataset tworoom --device cuda --goal-offset 25
 ```
