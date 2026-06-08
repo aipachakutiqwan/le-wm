@@ -7,13 +7,6 @@
 out/
 .ipynb_checkpoints/
 
-presentations/*
-notebooks/*
-tests/*
-plans/*
-notes/
-issues/
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
