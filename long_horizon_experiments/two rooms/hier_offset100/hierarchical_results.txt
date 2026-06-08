@@ -1,0 +1,57 @@
+
+==== CONFIG ====
+checkpoint: /home/kaboo/le-wm/long_horizon_experiments/hier_offset100/ckpt.ckpt
+device: cuda
+seed: 42
+random_policy: false
+world:
+  env_name: swm/TwoRoom-v1
+  num_envs: ${eval.num_eval}
+  max_episode_steps: 400
+  history_size: 3
+  frame_skip: 1
+dataset:
+  name: tworoom
+  keys_to_cache:
+  - action
+  - proprio
+plan:
+  H_high: 1
+  h_low: 3
+  outer_samples: 512
+  inner_samples: 256
+  outer_iters: 5
+  inner_iters: 30
+  outer_std: 2.5
+  inner_std: 1.0
+plan_config:
+  horizon: 1
+  receding_horizon: 1
+  history_len: 1
+  action_block: 1
+eval:
+  num_eval: 50
+  goal_offset_steps: 100
+  eval_budget: 200
+  img_size: 224
+  dataset_name: tworoom
+  callables:
+  - method: _set_state
+    args:
+      state:
+        value: proprio
+  - method: _set_goal_state
+    args:
+      goal_state:
+        value: goal_proprio
+output:
+  filename: hierarchical_results.txt
+
+==== RESULTS ====
+metrics: {'success_rate': 10.0, 'episode_successes': array([False, False, False, False, False,  True, False, False, False,
+        True,  True, False, False, False, False, False, False, False,
+       False,  True, False, False, False, False, False, False, False,
+       False, False, False, False, False, False, False, False, False,
+        True, False, False, False, False, False, False, False, False,
+       False, False, False, False, False]), 'seeds': None}
+evaluation_time: 1479.7 s
