@@ -1,0 +1,27 @@
+[2026-06-04 19:21:05,827][__main__][INFO] - Hierarchical eval — checkpoint=/var/cs231n/lewm-reacher/20260603_142704/hierarchical_lewm_epoch_20_object.ckpt device=cuda
+[2026-06-04 19:21:05,847][absl][INFO] - MUJOCO_GL=egl, attempting to import specified OpenGL backend.
+[2026-06-04 19:21:05,853][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-06-04 19:21:05,947][absl][INFO] - MuJoCo library version is: 3.8.1
+19:21:19.130 | INFO    (454190, stable_worldmodel.world) | 🌍🌍🌍 World swm/ReacherDMControl-v0 initialized 🌍🌍🌍
+19:21:19.131 | INFO    (454190, stable_worldmodel.world) | 🕹️ 🕹️ 🕹️ Action space 🕹️ 🕹️ 🕹️
+19:21:19.131 | INFO    (454190, stable_worldmodel.world) | Box(-1.0, 1.0, (100, 2), float64)
+19:21:19.131 | INFO    (454190, stable_worldmodel.world) | 👁️ 👁️ 👁️ Observation space 👁️ 👁️ 👁️
+19:21:19.131 | INFO    (454190, stable_worldmodel.world) | Box(-inf, inf, (100, 6), float32)
+19:21:19.131 | INFO    (454190, stable_worldmodel.world) | ⚗️ ⚗️ ⚗️ Variation space ⚗️ ⚗️ ⚗️
+agent:
+    arm_density: Box(500.0, 1500.0, (1,), float32)
+    color: Box(0.0, 1.0, (3,), float64)
+    finger_density: Box(500.0, 1500.0, (1,), float32)
+    finger_locked: Discrete(2)
+floor:
+    color: Box(0.0, 1.0, (2, 3), float64)
+light:
+    intensity: Box(0.0, 1.0, (1,), float64)
+rendering:
+    render_target: Discrete(2)
+target:
+    color: Box(0.0, 1.0, (3,), float64)
+    shape: Discrete(2)
+[2026-06-04 19:21:19,176][root][INFO] - Cached 'action' from '/var/cs231n/lewm-reacher/reacher.h5'
+[2026-06-04 19:21:19,701][__main__][INFO] - Loading checkpoint from /var/cs231n/lewm-reacher/20260603_142704/hierarchical_lewm_epoch_20_object.ckpt
+[2026-06-04 19:21:28,006][__main__][INFO] - 0 valid starting points found

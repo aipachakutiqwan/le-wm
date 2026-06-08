@@ -1,0 +1,25 @@
+[2026-06-04 15:54:34,601][absl][INFO] - MUJOCO_GL=egl, attempting to import specified OpenGL backend.
+[2026-06-04 15:54:34,608][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-06-04 15:54:34,705][absl][INFO] - MuJoCo library version is: 3.8.1
+15:54:41.462 | INFO    (373614, stable_worldmodel.world) | 🌍🌍🌍 World swm/ReacherDMControl-v0 initialized 🌍🌍🌍
+15:54:41.462 | INFO    (373614, stable_worldmodel.world) | 🕹️ 🕹️ 🕹️ Action space 🕹️ 🕹️ 🕹️
+15:54:41.462 | INFO    (373614, stable_worldmodel.world) | Box(-1.0, 1.0, (50, 2), float64)
+15:54:41.462 | INFO    (373614, stable_worldmodel.world) | 👁️ 👁️ 👁️ Observation space 👁️ 👁️ 👁️
+15:54:41.462 | INFO    (373614, stable_worldmodel.world) | Box(-inf, inf, (50, 6), float32)
+15:54:41.462 | INFO    (373614, stable_worldmodel.world) | ⚗️ ⚗️ ⚗️ Variation space ⚗️ ⚗️ ⚗️
+agent:
+    arm_density: Box(500.0, 1500.0, (1,), float32)
+    color: Box(0.0, 1.0, (3,), float64)
+    finger_density: Box(500.0, 1500.0, (1,), float32)
+    finger_locked: Discrete(2)
+floor:
+    color: Box(0.0, 1.0, (2, 3), float64)
+light:
+    intensity: Box(0.0, 1.0, (1,), float64)
+rendering:
+    render_target: Discrete(2)
+target:
+    color: Box(0.0, 1.0, (3,), float64)
+    shape: Discrete(2)
+[2026-06-04 15:54:41,505][root][INFO] - Cached 'action' from '/var/cs231n/lewm-reacher/reacher.h5'
+0 valid starting points found for evaluation.
