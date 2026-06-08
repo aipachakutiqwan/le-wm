@@ -247,6 +247,9 @@ outputs/
 qualitative analysis/path_trajectories/runs/flat_*/
 qualitative analysis/path_trajectories/runs/hier_*/
 
+# long-horizon study run scaffolding (local ckpt symlinks; results .txt stay tracked)
+long_horizon_experiments/**/ckpt*.ckpt
+
 # uv lock since we have different local setups
 uv.lock
 
