@@ -380,21 +380,14 @@ class HierarchicalLeWM(nn.Module):
 
         if self.lambda_var > 0.0:
             # Variance penalty on macro-actions — prevents A_ψ from collapsing to a
-            # constant embedding regardless of the input action chunk.  The hinge form
-            # relu(γ − std) only penalises dimensions whose batch std falls below γ=1;
-            # once std > 1 the gradient is zero, so the loss does not fight natural
-            # spread in the data.  Technique adapted from the VICReg variance term
-            # (Bardes et al., 2022 — https://arxiv.org/abs/2105.04906, Eq. 2).
+            # constant embedding regardless of the input action chunk. 
             flat = macro_actions.reshape(-1, self.latent_action_dim)
             loss_var = F.relu(1.0 - flat.std(dim=0)).mean()
         else:
             loss_var = pred_emb.new_zeros(1).squeeze()
 
         if self.lambda_kl > 0.0:
-            # KL-to-N(0,I) moment-matching on A_ψ outputs: push mean->0 and std->1
-            # per dim so the macro-action distribution matches the planner's CEM
-            # sampling prior. Stronger than the one-sided variance hinge above
-            # (also constrains the mean; can be used in place of lambda_var).
+            # moment-matching on A_ψ outputs: push mean->0 and std->1
             loss_kl = (
                 macro_actions.mean(dim=(0,1)).pow(2).mean()
                 + (macro_actions.std(dim=(0, 1)) - 1).pow(2).mean()
