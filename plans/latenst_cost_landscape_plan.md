@@ -1,4 +1,4 @@
-# Plan: Latent cost-landscape analysis (`qualitative analysis/heat maps/`)
+# Plan: Latent cost-landscape analysis (`analysis/heat maps/`)
 
 ## Prompts (the user requests that drove this work)
 1. Explain the latent cost-landscape heatmap, then generate the TwoRoom code (frozen encoder, L2); color low=green → high=red.
@@ -77,7 +77,7 @@ The five `landscape_*` / `_landscape_lib.py` were git-tracked → they appear as
 
 ## Run (from `~/le-wm`; wrap `wsl -e bash -c "…"` if launched from Windows)
 ```bash
-STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "qualitative analysis/heat maps/cost_landscape.py" --device cuda
-STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "qualitative analysis/heat maps/latent_cost_vs_offset.py" --device cuda
+STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "analysis/heat maps/cost_landscape.py" --device cuda
+STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "analysis/heat maps/latent_cost_vs_offset.py" --device cuda
 ```
 Light (encoder only). `STABLEWM_HOME` **must** be set (empty in non-interactive shells → silent FileNotFound).

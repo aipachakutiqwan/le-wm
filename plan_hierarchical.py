@@ -37,9 +37,9 @@ from torchvision.transforms import v2 as transforms
 from hierarchical_plan import plan
 
 import sys
-# traj_recording.py now lives in qualitative analysis/path_trajectories/ — add that
-# folder to sys.path (parent dir name has a space, so no clean package import).
-sys.path.insert(0, str(Path(__file__).resolve().parent / "qualitative analysis" / "path_trajectories"))
+# traj_recording.py now lives in analysis/path_trajectories/ — add that
+# folder to sys.path (not a package, so import via sys.path).
+sys.path.insert(0, str(Path(__file__).resolve().parent / "analysis" / "path_trajectories"))
 from traj_recording import RecordingPolicy, save_trajectories_npz
 
 

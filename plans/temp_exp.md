@@ -47,7 +47,7 @@ ablation *and* the published-baseline comparison.
 ## Run config
 - TwoRoom, d = goal_offset ∈ {25, (50), 75}, eval_budget = 2×d, seed=42.
 - This chat = trajectory plots only. First pass: **Option 2, d=25, N=10**.
-- Outputs: `qualitative analysis/path_trajectories/runs/{flat,hier}_dXX/`; figures in `runs/figures/`.
+- Outputs: `analysis/path_trajectories/runs/{flat,hier}_dXX/`; figures in `analysis/path_trajectories/runs/figures/`.
 
 ## Runs log
 

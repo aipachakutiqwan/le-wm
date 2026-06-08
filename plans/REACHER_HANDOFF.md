@@ -75,7 +75,7 @@ overlaying the Δ distances on the curve (see deliverable below).
   this is `STABLEWM_HOME`). Extraction is via `zstandard`→`tar` (no `zstd` binary on the box). By
   the time you run, `reacher.h5` should be in place. (`tworoom.h5` itself came from a
   `tworoom.tar.zst` the same way, so the archive almost certainly contains `reacher.h5` directly.)
-- **Existing script:** `qualitative analysis/heat maps/cost_landscape.py` (standalone, currently
+- **Existing script:** `analysis/heat maps/cost_landscape.py` (standalone, currently
   at `origin/main`).
 
 ## The actual work: adapt `cost_landscape.py` for Reacher geometry
@@ -109,7 +109,7 @@ It is hardcoded for TwoRoom. Needed changes:
 
 ```bash
 cd ~/le-wm
-STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "qualitative analysis/heat maps/cost_landscape.py" \
+STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "analysis/heat maps/cost_landscape.py" \
     --checkpoint baseline/reacher/lewm_epoch_10_object.ckpt --dataset reacher --metric l2 --device cuda
 ```
 *(If launched from the Windows host, wrap commands as `wsl -e bash -c "…"`.)*
@@ -154,7 +154,7 @@ STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "qualitative analysis/he
 > Everything below was produced after picking up this brief. Audience = the agent
 > who ordered these experiments. Self-contained; read top-to-bottom. Nothing was
 > committed (standing rule). All figures are PNG, saved in
-> `qualitative analysis/heat maps/`.
+> `analysis/heat maps/`.
 
 ## 0. TL;DR (the verdict)
 - **Both** environments' latent planning cost `||E(s) - E(g)||` saturates with true
@@ -208,7 +208,7 @@ episode length** — Reacher ≤200, TwoRoom ≤100. **A literal 0–500 offset 
 episode is that long); we plot the feasible range and annotate the cap. It doesn't matter:
 both costs are fully saturated well before the cap.
 
-## 4. Scripts produced (new files, all in `qualitative analysis/heat maps/`)
+## 4. Scripts produced (new files, all in `analysis/heat maps/`)
 | File | Produces | What it shows |
 |---|---|---|
 | `cost_landscape_reacher.py` | `cost_landscape_reacher.png` + `…_vs_distance.png` | Reacher heatmap + cost-vs-distance curve **with per-Δ operating-distance overlay** (the brief's deliverable). |
@@ -222,9 +222,9 @@ file alongside them.
 Run (from `~/le-wm`; wrap as `wsl -e bash -c "…"` if launched from Windows):
 ```bash
 cd ~/le-wm
-STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "qualitative analysis/heat maps/cost_landscape_reacher.py" --device cuda
-STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "qualitative analysis/heat maps/cost_landscape_compare.py" --device cuda
-STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "qualitative analysis/heat maps/latent_cost_vs_offset.py" --device cuda
+STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "analysis/heat maps/cost_landscape_reacher.py" --device cuda
+STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "analysis/heat maps/cost_landscape_compare.py" --device cuda
+STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python "analysis/heat maps/latent_cost_vs_offset.py" --device cuda
 ```
 All are light (encoder forward passes only; no CEM). Methodology note: per-Δ distances are
 **within-episode** `||pos[s+Δ] - pos[s]||` (respecting `ep_offset`/`ep_len`), same coordinate +

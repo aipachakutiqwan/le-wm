@@ -2,7 +2,7 @@
 
 Reproduces the latent-space analysis kept for the paper — the **macro-action linear
 probe** (Fig. `macro_probe` = `macro_probe_tworoom.pdf`) — and records the
-2026-06-07 trim of `qualitative analysis/latent_analysis/` down to what the paper uses.
+2026-06-07 trim of `analysis/latent_analysis/` down to what the paper uses.
 
 ## Prompts (the asks that drove this)
 
@@ -43,7 +43,7 @@ trim (see *Deleted*).
 cd ~/le-wm
 export STABLEWM_HOME=$HOME/.stable_worldmodel
 CKPT=$HOME/le-wm/results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt
-DIR="qualitative analysis/latent_analysis"
+DIR="analysis/latent_analysis"
 
 # 1) extract A_ψ macro-actions -> figures/macro_action_tworoom.npz (the probe's input)
 .venv/bin/python "$DIR/macro_action_tsne.py" --checkpoint "$CKPT" --device cuda
