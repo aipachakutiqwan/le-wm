@@ -1,0 +1,59 @@
+[2026-06-04 14:42:34,560][absl][INFO] - MUJOCO_GL=egl, attempting to import specified OpenGL backend.
+[2026-06-04 14:42:34,567][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-06-04 14:42:35,015][absl][INFO] - MuJoCo library version is: 3.8.1
+14:42:41.636 | INFO    (349591, stable_worldmodel.world) | 🌍🌍🌍 World swm/ReacherDMControl-v0 initialized 🌍🌍🌍
+14:42:41.636 | INFO    (349591, stable_worldmodel.world) | 🕹️ 🕹️ 🕹️ Action space 🕹️ 🕹️ 🕹️
+14:42:41.636 | INFO    (349591, stable_worldmodel.world) | Box(-1.0, 1.0, (50, 2), float64)
+14:42:41.636 | INFO    (349591, stable_worldmodel.world) | 👁️ 👁️ 👁️ Observation space 👁️ 👁️ 👁️
+14:42:41.637 | INFO    (349591, stable_worldmodel.world) | Box(-inf, inf, (50, 6), float32)
+14:42:41.637 | INFO    (349591, stable_worldmodel.world) | ⚗️ ⚗️ ⚗️ Variation space ⚗️ ⚗️ ⚗️
+agent:
+    arm_density: Box(500.0, 1500.0, (1,), float32)
+    color: Box(0.0, 1.0, (3,), float64)
+    finger_density: Box(500.0, 1500.0, (1,), float32)
+    finger_locked: Discrete(2)
+floor:
+    color: Box(0.0, 1.0, (2, 3), float64)
+light:
+    intensity: Box(0.0, 1.0, (1,), float64)
+rendering:
+    render_target: Discrete(2)
+target:
+    color: Box(0.0, 1.0, (3,), float64)
+    shape: Discrete(2)
+[2026-06-04 14:42:41,681][root][INFO] - Cached 'action' from '/var/cs231n/lewm-reacher/reacher.h5'
+10000 valid starting points found for evaluation.
+[ 128037  136278  171855  178488  184719  188337  256476  331650  365820
+  403206  455868  555564  711942  743097  806814  866310  877968  889224
+  895455  902289  903495 1002588 1027914 1053843 1093842 1112736 1268109
+ 1290822 1309314 1362177 1395543 1406799 1436748 1473129 1522374 1524183
+ 1547901 1564383 1566795 1574433 1649808 1661265 1682370 1717947 1722570
+ 1781664 1794528 1857642 1950102 1953318]
+CEM solve time: 206.0972 seconds
+CEM solve time: 206.4275 seconds
+CEM solve time: 206.1149 seconds
+CEM solve time: 206.1386 seconds
+CEM solve time: 205.8992 seconds
+CEM solve time: 205.6591 seconds
+CEM solve time: 205.9199 seconds
+CEM solve time: 205.0243 seconds
+CEM solve time: 204.7603 seconds
+CEM solve time: 205.6225 seconds
+CEM solve time: 205.0536 seconds
+CEM solve time: 205.1938 seconds
+CEM solve time: 205.0147 seconds
+CEM solve time: 205.7317 seconds
+CEM solve time: 203.4924 seconds
+CEM solve time: 203.4215 seconds
+CEM solve time: 205.7259 seconds
+CEM solve time: 205.4245 seconds
+CEM solve time: 206.2281 seconds
+CEM solve time: 207.2692 seconds
+Video saved to /var/cs231n/lewm-reacher
+{'success_rate': 78.0, 'episode_successes': array([False,  True, False,  True,  True,  True,  True,  True, False,
+        True, False, False,  True,  True,  True,  True,  True,  True,
+        True, False,  True, False,  True, False,  True,  True,  True,
+        True,  True,  True,  True,  True, False,  True,  True,  True,
+        True, False,  True,  True,  True, False,  True,  True,  True,
+        True,  True,  True,  True,  True]), 'seeds': None}
+Saving results to /var/cs231n/lewm-reacher/env_n50_seed42_sr78p000.txt

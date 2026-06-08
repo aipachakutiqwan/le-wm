@@ -1,0 +1,62 @@
+[2026-06-05 01:38:51,762][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-06-05 01:38:51,819][absl][INFO] - MUJOCO_GL=egl, attempting to import specified OpenGL backend.
+[2026-06-05 01:38:51,842][absl][INFO] - MuJoCo library version is: 3.8.1
+01:39:33.122 | INFO    (600717, stable_worldmodel.world) | 🌍🌍🌍 World swm/OGBCube-v0 initialized 🌍🌍🌍
+01:39:33.122 | INFO    (600717, stable_worldmodel.world) | 🕹️ 🕹️ 🕹️ Action space 🕹️ 🕹️ 🕹️
+01:39:33.122 | INFO    (600717, stable_worldmodel.world) | Box(-1.0, 1.0, (50, 5), float32)
+01:39:33.122 | INFO    (600717, stable_worldmodel.world) | 👁️ 👁️ 👁️ Observation space 👁️ 👁️ 👁️
+01:39:33.122 | INFO    (600717, stable_worldmodel.world) | Box(-inf, inf, (50, 28), float64)
+01:39:33.123 | INFO    (600717, stable_worldmodel.world) | ⚗️ ⚗️ ⚗️ Variation space ⚗️ ⚗️ ⚗️
+agent:
+    color: Box(0.0, 1.0, (3,), float64)
+    ee_start_position: Box([ 0.25 -0.35  0.2 ], [0.6  0.35 0.35], (3,), float64)
+camera:
+    angle_delta: Box(-10.0, 10.0, (1, 2), float64)
+cube:
+    color: Box(0.0, 1.0, (1, 3), float64)
+    goal_position: Box([[ 0.3 -0.3]], [[0.55 0.3 ]], (1, 2), float64)
+    goal_yaw: Box(0.0, 6.283185307179586, (1,), float64)
+    size: Box(0.01, 0.03, (1,), float64)
+    start_position: Box([[ 0.3 -0.3]], [[0.55 0.3 ]], (1, 2), float64)
+    start_yaw: Box(0.0, 6.283185307179586, (1,), float64)
+floor:
+    color: Box(0.0, 1.0, (2, 3), float64)
+light:
+    intensity: Box(0.0, 1.0, (1,), float64)
+[2026-06-05 01:39:33,166][root][INFO] - Cached 'action' from '/home/jupyter/lewm-cube/ogbench/cube_single_expert.h5'
+1010000 valid starting points found for evaluation.
+[ 128254  136498  172701  179339  185155  189215  257490  332079  366870
+  404875  456706  556223  712568  745195  808828  870225  882046  891239
+  895742  905175  905355 1005640 1031541 1058122 1096271 1114621 1269574
+ 1294087 1315585 1362596 1401611 1408022 1442026 1478781 1523661 1529822
+ 1555557 1564466 1570862 1579897 1653670 1663496 1687818 1725062 1725645
+ 1784554 1795149 1862707 1951000 1960840]
+CEM solve time: 209.9675 seconds
+CEM solve time: 208.2440 seconds
+CEM solve time: 207.5532 seconds
+CEM solve time: 208.0810 seconds
+CEM solve time: 208.0546 seconds
+CEM solve time: 208.2582 seconds
+CEM solve time: 206.6842 seconds
+CEM solve time: 206.8617 seconds
+CEM solve time: 208.6123 seconds
+CEM solve time: 206.6685 seconds
+CEM solve time: 206.8300 seconds
+CEM solve time: 207.2602 seconds
+CEM solve time: 206.6614 seconds
+CEM solve time: 208.0626 seconds
+CEM solve time: 207.9085 seconds
+CEM solve time: 206.8850 seconds
+CEM solve time: 207.6755 seconds
+CEM solve time: 206.5837 seconds
+CEM solve time: 207.3825 seconds
+CEM solve time: 207.4918 seconds
+Video saved to /home/jupyter/lewm-cube
+{'success_rate': 48.0, 'episode_successes': array([False, False,  True, False, False,  True, False,  True, False,
+        True,  True,  True,  True,  True, False,  True, False, False,
+        True,  True, False, False, False,  True, False,  True,  True,
+       False,  True,  True, False, False, False, False,  True,  True,
+       False,  True, False, False, False, False, False,  True,  True,
+        True, False, False,  True,  True]), 'seeds': None}
+Saving results to /home/jupyter/lewm-cube/env_n50_seed42_sr48p000.txt
+[2026-06-05 02:52:27,554][OpenGL.platform.ctypesloader][INFO] - Failed to load library ( 'libGLU.so.0' ): libGLU.so.0: cannot open shared object file: No such file or directory

@@ -1,0 +1,41 @@
+[2026-06-04 10:49:53,031][absl][INFO] - MUJOCO_GL=egl, attempting to import specified OpenGL backend.
+[2026-06-04 10:49:53,037][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-06-04 10:49:53,131][absl][INFO] - MuJoCo library version is: 3.8.1
+10:49:59.757 | INFO    (255953, stable_worldmodel.world) | 🌍🌍🌍 World swm/ReacherDMControl-v0 initialized 🌍🌍🌍
+10:49:59.757 | INFO    (255953, stable_worldmodel.world) | 🕹️ 🕹️ 🕹️ Action space 🕹️ 🕹️ 🕹️
+10:49:59.757 | INFO    (255953, stable_worldmodel.world) | Box(-1.0, 1.0, (50, 2), float64)
+10:49:59.757 | INFO    (255953, stable_worldmodel.world) | 👁️ 👁️ 👁️ Observation space 👁️ 👁️ 👁️
+10:49:59.757 | INFO    (255953, stable_worldmodel.world) | Box(-inf, inf, (50, 6), float32)
+10:49:59.758 | INFO    (255953, stable_worldmodel.world) | ⚗️ ⚗️ ⚗️ Variation space ⚗️ ⚗️ ⚗️
+agent:
+    arm_density: Box(500.0, 1500.0, (1,), float32)
+    color: Box(0.0, 1.0, (3,), float64)
+    finger_density: Box(500.0, 1500.0, (1,), float32)
+    finger_locked: Discrete(2)
+floor:
+    color: Box(0.0, 1.0, (2, 3), float64)
+light:
+    intensity: Box(0.0, 1.0, (1,), float64)
+rendering:
+    render_target: Discrete(2)
+target:
+    color: Box(0.0, 1.0, (3,), float64)
+    shape: Discrete(2)
+[2026-06-04 10:49:59,801][root][INFO] - Cached 'action' from '/var/cs231n/lewm-reacher/reacher.h5'
+1260000 valid starting points found for evaluation.
+[ 128258  136503  172712  179351  185164  189234  257493  332086  366882
+  404893  456716  556238  712575  745219  808832  870254  882066  891242
+  895764  905197  905370 1005653 1031548 1058142 1096278 1114642 1269590
+ 1294103 1315603 1362601 1401628 1408028 1442045 1478795 1523683 1529832
+ 1555571 1564487 1570879 1579913 1653685 1663504 1687830 1725085 1725669
+ 1784576 1795154 1862723 1951024 1960871]
+CEM solve time: 206.6597 seconds
+CEM solve time: 205.8050 seconds
+Video saved to /var/cs231n/lewm-reacher
+{'success_rate': 80.0, 'episode_successes': array([ True,  True,  True, False,  True, False,  True,  True,  True,
+        True,  True,  True,  True,  True,  True, False,  True, False,
+        True, False,  True,  True,  True,  True,  True,  True,  True,
+        True,  True,  True,  True,  True,  True,  True,  True,  True,
+       False, False,  True,  True,  True,  True,  True,  True, False,
+        True, False,  True,  True, False]), 'seeds': None}
+Saving results to /var/cs231n/lewm-reacher/env_n50_seed42_sr80p000.txt
