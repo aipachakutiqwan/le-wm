@@ -145,6 +145,16 @@ This function accepts:
 
 The returned module is in `eval` mode with its PyTorch weights accessible via `.state_dict()`.
 
+## Development
+
+Dev dependencies (linting, etc.):
+
+```bash
+uv pip install -r pyproject.toml --group dev
+```
+
+Pull requests: branch from `main`, open against `main`.
+
 ## Contact & Contributions
 Feel free to open [issues](https://github.com/lucas-maes/le-wm/issues)! For questions or collaborations, please contact `lucas.maes@mila.quebec`
 
