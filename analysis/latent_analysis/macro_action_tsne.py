@@ -42,7 +42,7 @@ from sklearn.manifold import TSNE
 from sklearn import preprocessing
 
 import stable_worldmodel as swm
-from waypoint_sampler import sample_waypoints_fixed_stride
+from utils.waypoint_sampler import sample_waypoints_fixed_stride
 
 # 2D colormap corners (same scheme as the position figures)
 _BL = np.array([0.20, 0.30, 0.85])  # low dx, low dy

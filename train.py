@@ -15,7 +15,7 @@ from omegaconf import OmegaConf, open_dict
 
 from jepa import JEPA
 from module import ARPredictor, Embedder, MLP, SIGReg
-from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
+from utils.utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
 
 
 def lejepa_forward(self, batch, stage, cfg):

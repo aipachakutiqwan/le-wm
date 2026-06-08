@@ -37,7 +37,7 @@ Every step below has a **Code:** callout pointing to the exact symbol that imple
 
 | Step                | What it does                       | Code                                                                                                          |
 | ------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Train Step 1        | Pick waypoint frames               | `[sample_waypoints](../waypoint_sampler.py:41)`                                                              |
+| Train Step 1        | Pick waypoint frames               | `[sample_waypoints](../utils/waypoint_sampler.py:41)`                                                              |
 | Train Step 2        | Encode waypoints with frozen E     | `[forward_high` (Step 2 block)](../hierarchical_lewm.py:387)                                                  |
 | Train Step 3        | Encode action chunk → macro-action | `[ActionEncoder](../hierarchical_lewm.py:84)` · [call site](../hierarchical_lewm.py:393)                     |
 | Train Step 4        | Predict next waypoint latent       | `[HighLevelPredictor](../hierarchical_lewm.py:185)` · [call site](../hierarchical_lewm.py:404)                |
@@ -139,7 +139,7 @@ a_t = primitive action at time t
 
 ## Step 1: Choose waypoint pairs
 
-> **Code:** `[sample_waypoints](../waypoint_sampler.py:41)` in `hierarchical_lewm.py`. Called once per batch from inside `[train_hierarchical_lewm](../hierarchical_lewm.py:502)`.
+> **Code:** `[sample_waypoints](../utils/waypoint_sampler.py:41)` in `hierarchical_lewm.py`. Called once per batch from inside `[train_hierarchical_lewm](../hierarchical_lewm.py:502)`.
 
 Instead of using every next frame, H-LeWM uses farther-apart waypoint frames.
 

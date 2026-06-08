@@ -50,7 +50,7 @@ I'm leaning option 1 (fixed stride) — same spec PLDM used in HWM, and removes 
 
 ## Code pointers
 
-- `sample_waypoints` now lives in `waypoint_sampler.py:41` (moved out of `hierarchical_lewm.py`). The same file also exports `sample_waypoints_fixed_stride` (PLDM-style, line 71) and `sample_waypoints_variable_span` (DINO-WM-style, line 110) so the fix is now a one-line import swap inside `train_hierarchical_lewm`.
+- `sample_waypoints` now lives in `utils/waypoint_sampler.py:41` (moved out of `hierarchical_lewm.py`). The same file also exports `sample_waypoints_fixed_stride` (PLDM-style, line 71) and `sample_waypoints_variable_span` (DINO-WM-style, line 110) so the fix is now a one-line import swap inside `train_hierarchical_lewm`.
 - Called once per batch from `train_hierarchical_lewm`, `hierarchical_lewm.py:552` — so every trajectory in a batch shares the same waypoint indices (separate but related side-effect: no padding mask is ever needed inside `A_psi`).
 
 ---

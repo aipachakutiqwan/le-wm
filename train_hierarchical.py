@@ -51,8 +51,8 @@ from torchvision.transforms import v2 as T
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 from hierarchical_lewm import HierarchicalLeWM
-from waypoint_sampler import sample_waypoints_fixed_stride
-from utils import get_column_normalizer, ModelObjectCallBack
+from utils.waypoint_sampler import sample_waypoints_fixed_stride
+from utils.utils import get_column_normalizer, ModelObjectCallBack
 
 
 # ──────────────────────────────────────────────────────────────────────────────

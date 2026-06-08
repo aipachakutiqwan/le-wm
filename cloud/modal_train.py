@@ -72,7 +72,7 @@ def make_image(tag: str) -> modal.Image:
 DOWNLOAD_IMAGE = (
     modal.Image.debian_slim()
     .pip_install("huggingface_hub", "zstandard")
-    .add_local_file(str(_REPO_ROOT / "download_datasets.py"), "/app/download_datasets.py")
+    .add_local_file(str(_REPO_ROOT / "scripts" / "download_datasets.py"), "/app/download_datasets.py")
 )
 
 # Training image — resolved from LEWM_TAG env var at import time.

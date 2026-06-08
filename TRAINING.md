@@ -5,7 +5,7 @@
 ### Docker workflow (recommended)
 
 No venv needed. All dependencies run inside the container. Only requirements on the host:
-- `python` — to run `devtools.py` (`fire` is auto-installed on first run)
+- `python` — to run `scripts/devtools.py` (`fire` is auto-installed on first run)
 - `docker` — to build and run containers
 - `git` — for auto-tagging
 
@@ -124,7 +124,7 @@ git lfs pull --include="baseline/tworoom/lewm_epoch_9_object.ckpt"
 Pass the **directory** containing the checkpoint as `policy`. `AutoCostModel` will pick the latest `*_object.ckpt` inside it automatically.
 
 ```bash
-# inside the Docker dev shell (./devtools.py dev <tag>)
+# inside the Docker dev shell (./scripts/devtools.py dev <tag>)
 cd /app
 python eval.py --config-name tworoom policy=/app/baseline/tworoom
 
@@ -160,7 +160,7 @@ For `policy=/app/baseline/tworoom`, that resolves to `/app/baseline/tworoom_resu
 
 ## 5. Docker
 
-All Docker operations go through `./devtools.py`. Image name is fixed as `cs231n_project/lewm`.
+All Docker operations go through `./scripts/devtools.py`. Image name is fixed as `cs231n_project/lewm`.
 
 > **Eval requires EGL.** The image installs `libegl1`, `libgl1`, and `libglfw3` so MuJoCo can render headlessly. `eval.py` sets `MUJOCO_GL=egl` automatically — no extra flags needed at runtime.
 
@@ -178,14 +178,14 @@ Builds target **`linux/amd64`** (CUDA / `box2d` wheels). On Apple Silicon, Docke
 
 ```bash
 # auto-tagged from git
-./devtools.py build_docker
+./scripts/devtools.py build_docker
 
 # explicit tag
-./devtools.py build_docker --tag test
+./scripts/devtools.py build_docker --tag test
 
 # build and push to GHCR in one shot (requires GITHUB_PAT and GITHUB_USERNAME)
-./devtools.py build_docker --push
-./devtools.py build_docker --tag test --push
+./scripts/devtools.py build_docker --push
+./scripts/devtools.py build_docker --tag test --push
 ```
 
 ### Develop without rebuilding
@@ -193,7 +193,7 @@ Builds target **`linux/amd64`** (CUDA / `box2d` wheels). On Apple Silicon, Docke
 Mounts the local repo at `/app` — edits on the host are instantly reflected inside the container:
 
 ```bash
-./devtools.py dev test
+./scripts/devtools.py dev test
 ```
 
 Inside the container:
@@ -208,12 +208,12 @@ python3 train.py data=pusht setup=local_rtx2080
 `run_local` requires tag explicitly — no default:
 
 ```bash
-./devtools.py run_local test
-./devtools.py run_local test --data pusht
-./devtools.py run_local test --data pusht --setup local_rtx2080
+./scripts/devtools.py run_local test
+./scripts/devtools.py run_local test --data pusht
+./scripts/devtools.py run_local test --data pusht --setup local_rtx2080
 
 # pass extra Hydra overrides
-./devtools.py run_local test --data pusht --overrides "[trainer.limit_train_batches=10,trainer.max_epochs=1,subdir=test]"
+./scripts/devtools.py run_local test --data pusht --overrides "[trainer.limit_train_batches=10,trainer.max_epochs=1,subdir=test]"
 ```
 
 ### Push to GHCR
@@ -224,8 +224,8 @@ python3 train.py data=pusht setup=local_rtx2080
 3. Copy the token
 
 ```bash
-./devtools.py login
-./devtools.py push_docker <tag>
+./scripts/devtools.py login
+./scripts/devtools.py push_docker <tag>
 ```
 
 ### Grant access to collaborators
@@ -241,8 +241,8 @@ Generate a GitHub PAT at https://github.com/settings/tokens with `read:packages`
 ```bash
 export GITHUB_USERNAME=<image-owner-username>
 export GITHUB_PAT=<your-pat>
-./devtools.py login
-./devtools.py pull_docker <tag>
+./scripts/devtools.py login
+./scripts/devtools.py pull_docker <tag>
 ```
 
 The image is pulled from `ghcr.io/<image-owner-username>/lewm:<tag>` and automatically retagged locally as `cs231n_project/lewm:<tag>` — ready to use with `run_local` and `dev` immediately.
@@ -271,7 +271,7 @@ and `HighLevelPredictor` (P^(2)) on a teacher-forcing waypoint loss.
 ### Prerequisites
 
 You need a stage-1 checkpoint (`lewm_epoch_N_object.ckpt`) from stage-1 training or the
-paper weights (see `convert_paper_weights.py`).
+paper weights (see `scripts/convert_paper_weights.py`).
 
 ---
 
@@ -304,17 +304,17 @@ The Docker image already contains `train_hierarchical.py`. Override the entrypoi
 
 ```bash
 # Dry-run (2 epochs, batch=8, no W&B)
-./devtools.py run_hierarchical_local <tag> \
+./scripts/devtools.py run_hierarchical_local <tag> \
   --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
   --dry-run
 
 # Full run
-./devtools.py run_hierarchical_local <tag> \
+./scripts/devtools.py run_hierarchical_local <tag> \
   --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
   --data tworoom
 
 # With extra Hydra overrides
-./devtools.py run_hierarchical_local <tag> \
+./scripts/devtools.py run_hierarchical_local <tag> \
   --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
   --overrides "[stage2.n_epochs=50,wandb.enabled=False]"
 ```
@@ -340,12 +340,12 @@ The file will be at `/stablewm-home/lewm_epoch_100_object.ckpt` inside the conta
 
 ```bash
 # Dry-run (~5 min, 2 epochs, A100)
-./devtools.py run_hierarchical_modal <tag> \
+./scripts/devtools.py run_hierarchical_modal <tag> \
   --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
   --dry-run
 
 # Full run
-./devtools.py run_hierarchical_modal <tag> \
+./scripts/devtools.py run_hierarchical_modal <tag> \
   --stage1-checkpoint /stablewm-home/lewm_epoch_100_object.ckpt \
   --data tworoom
 

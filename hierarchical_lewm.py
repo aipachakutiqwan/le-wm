@@ -19,7 +19,7 @@ from torch import nn
 
 from jepa import JEPA
 from module import ARPredictor
-from waypoint_sampler import sample_waypoints_fixed_stride
+from utils.waypoint_sampler import sample_waypoints_fixed_stride
 
 py_log = logging.getLogger(__name__)
 
