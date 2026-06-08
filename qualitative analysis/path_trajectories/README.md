@@ -5,7 +5,7 @@ path through TwoRoom under the **flat LeWM** planner vs. the **hierarchical H-Le
 planner, on the *same* episodes (identical start/goal pairs). Shows *where* each planner
 goes and whether it reaches the goal.
 
-Both planners use the **same checkpoint** (`models/hierarchical_lewm_epoch_14_tworooms_object.ckpt`):
+Both planners use the **same checkpoint** (`results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt`):
 flat = the inner JEPA extracted via `AutoCostModel` driven by a single-level CEM; hier =
 the full model with the two-level CEM. So any difference in the paths is the **planner**,
 not the model (the clean "Option 2" ablation).
@@ -32,7 +32,7 @@ reusing one folder for several horizons makes their results collide (don't do th
 
 ```bash
 cd ~/le-wm
-CKPT=$HOME/le-wm/models/hierarchical_lewm_epoch_14_tworooms_object.ckpt
+CKPT=$HOME/le-wm/results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt
 RUN="qualitative analysis/path_trajectories/runs"
 mkdir -p "$RUN/figures"
 for d in 25 50 75 100; do

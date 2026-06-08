@@ -25,7 +25,7 @@ Loads a trained checkpoint, encodes dataset frames, fits the probe, and plots â€
 - Run from the repo root (`~/le-wm`) with the project venv (`.venv/bin/python`).
 - `STABLEWM_HOME` points at the dataset cache (holds `tworoom.h5`, ~12 GB).
 - **Checkpoint** (the Stage-2 `HierarchicalLeWM` object used for the paper; its `A_Ïˆ`
-  is what the probe reads): `models/hierarchical_lewm_epoch_14_tworooms_object.ckpt`.
+  is what the probe reads): `results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt`.
 - **Dependencies** (already in the venv): `torch`, `stable-worldmodel==0.0.6`,
   `transformers==4.57.6`, `scikit-learn`, `matplotlib`, `numpy`.
 - GPU optional: `--device cuda` (default) or `--device cpu`.
@@ -36,7 +36,7 @@ Loads a trained checkpoint, encodes dataset frames, fits the probe, and plots â€
 ```bash
 cd ~/le-wm
 export STABLEWM_HOME=$HOME/.stable_worldmodel
-CKPT=$HOME/le-wm/models/hierarchical_lewm_epoch_14_tworooms_object.ckpt
+CKPT=$HOME/le-wm/results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt
 DIR="qualitative analysis/latent_analysis"
 
 # 1) extract A_Ïˆ macro-actions -> figures/macro_action_tworoom.npz (the probe's input)

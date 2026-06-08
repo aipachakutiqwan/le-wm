@@ -9,9 +9,9 @@
 - Given the paper, remove repo artifacts it doesn't reference (videos, npz, logs).
 
 ## Reproduce the analysis (from `~/le-wm`, serial — hier replans every step, so it's slow)
-Same checkpoint for both planners (Option 2): `models/hierarchical_lewm_epoch_14_tworooms_object.ckpt`
+Same checkpoint for both planners (Option 2): `results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt`
 ```bash
-CKPT=$HOME/le-wm/models/hierarchical_lewm_epoch_14_tworooms_object.ckpt
+CKPT=$HOME/le-wm/results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt
 RUNS="$HOME/le-wm/qualitative analysis/path_trajectories/runs"
 ln -sfn "$RUNS" "$HOME/.lewm_runs"               # no-space alias for Hydra args (path has a space)
 
@@ -49,5 +49,5 @@ STABLEWM_HOME=$HOME/.stable_worldmodel .venv/bin/python plan_hierarchical.py \
 - `wandb/` (25M, also on W&B server), `outputs/` (hydra logs), all `__pycache__/`  → ~26M
 - all 590 `*.mp4` rollout videos (`long_horizon_experiments/`, `path_trajectories/runs/`)  → ~15M
 - all 8 `*.npz` trajectory recordings (`path_trajectories/runs/{flat,hier}_d{25,50,75,100}`)
-- **Kept:** code, configs, `models/…epoch_14` ckpt, paper figures + `result.txt`, `.claude/`, `temp_exp.md`
+- **Kept:** code, configs, `results/hierarchical/tworooms/…epoch_14` ckpt, paper figures + `result.txt`, `.claude/`, `temp_exp.md`
 - **Reclaimed ≈ 41M.** Still removable: `baseline/tworoom/hierarchical_lewm_object.ckpt` (117M, superseded by epoch_14), `baseline/{cube,pusht}` flat ckpts (144M, re-downloadable).

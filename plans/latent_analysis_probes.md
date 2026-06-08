@@ -27,7 +27,7 @@ space**, so it needs a trained H-LeWM checkpoint. End to end:
    `python train.py data=tworoom`
 2. **Stage 2 — H-LeWM**: freeze E + P¹; jointly train the action encoder A_ψ +
    high-level predictor P² (teacher-forced waypoint MSE + N(0,I) moment-matching on
-   the macro-actions) → `models/hierarchical_lewm_epoch_14_tworooms_object.ckpt`:
+   the macro-actions) → `results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt`:
    `python train_hierarchical.py data=tworoom stage1_checkpoint=<stage1.ckpt>`
 3. **This analysis** (offline — no env, no planner): load that checkpoint and run the
    two steps under *Reproduce* below.
@@ -42,7 +42,7 @@ trim (see *Deleted*).
 ```bash
 cd ~/le-wm
 export STABLEWM_HOME=$HOME/.stable_worldmodel
-CKPT=$HOME/le-wm/models/hierarchical_lewm_epoch_14_tworooms_object.ckpt
+CKPT=$HOME/le-wm/results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt
 DIR="qualitative analysis/latent_analysis"
 
 # 1) extract A_ψ macro-actions -> figures/macro_action_tworoom.npz (the probe's input)
@@ -52,7 +52,7 @@ DIR="qualitative analysis/latent_analysis"
 ```
 
 Result: `macro_probe_tworoom.pdf` — CV R²=0.89 (Δx 0.80, Δy 0.98), the paper's Fig. `macro_probe`.
-Checkpoint: `models/hierarchical_lewm_epoch_14_tworooms_object.ckpt` (Stage-2 H-LeWM, TwoRoom).
+Checkpoint: `results/hierarchical/tworooms/hierarchical_lewm_epoch_14_tworooms_object.ckpt` (Stage-2 H-LeWM, TwoRoom).
 
 ## Kept
 - `macro_action_tsne.py` — extracts A_ψ macro-actions → `.npz` (probe input; t-SNE plot is an unused byproduct)
