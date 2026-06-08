@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import stable_worldmodel as swm
 from sklearn import preprocessing
 from hierarchical_plan import cem, plan
-from waypoint_sampler import sample_waypoints_fixed_stride
+from utils.waypoint_sampler import sample_waypoints_fixed_stride
 
 # ImageNet normalisation — must match img_transform() in plan_hierarchical.py
 _MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1)

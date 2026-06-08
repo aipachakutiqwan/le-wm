@@ -25,7 +25,7 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_IMAGE = "nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04"
 # GPU training targets x86_64 Linux. Building on Apple Silicon without this defaults to
 # linux/arm64, where box2d (stable-worldmodel[env]) has no wheels.

@@ -61,12 +61,12 @@ intact and **adds** the hierarchical layer and analysis tooling:
 - `train_hierarchical.py` — Hydra driver for Stage-2 training
 - `hierarchical_plan.py` — two-level CEM and the `plan()` routine
 - `plan_hierarchical.py` — Hydra driver for hierarchical evaluation
-- `waypoint_sampler.py` — waypoint subsampling for Stage-2 windows
+- `utils/waypoint_sampler.py` — waypoint subsampling for Stage-2 windows
 - `config/train/hierarchical.yaml`, `config/train/setup/*` — Stage-2 configs
 - `config/eval/hierarchical_{tworoom,pusht,cube,reacher}.yaml` — hierarchical eval configs
 - `qualitative analysis/` — heat-map cost-landscape, latent-analysis macro-action probe, path-trajectory, and diagnostics scripts
 - `results/`, `long_horizon_experiments/` — our evaluation outputs and long-horizon sweep
-- `cloud/`, `devtools.py`, Docker workflow — multi-GPU and Modal/GCP training infrastructure
+- `cloud/`, `scripts/devtools.py`, Docker workflow — multi-GPU and Modal/GCP training infrastructure
 
 **Upstream LeWM (unchanged contribution of the original authors)**
 - The end-to-end JEPA model and SIGReg objective (`jepa.py`, `module.py`, `train.py`, `eval.py`)
@@ -75,7 +75,7 @@ intact and **adds** the hierarchical layer and analysis tooling:
   [stable-pretraining](https://github.com/galilai-group/stable-pretraining) for training.
 
 For Stage 1 we directly use the pretrained LeWM weights released by the original authors on
-[Hugging Face](https://huggingface.co/collections/quentinll/lewm) (converted via `convert_paper_weights.py`),
+[Hugging Face](https://huggingface.co/collections/quentinll/lewm) (converted via `scripts/convert_paper_weights.py`),
 so no Stage-1 retraining is required to reproduce our results.
 
 ---
@@ -124,10 +124,10 @@ python train.py data=tworoom
 Checkpoints are saved to `$STABLEWM_HOME`. To skip Stage 1, use the released paper weights:
 
 ```bash
-python convert_paper_weights.py --only tworooms
+python scripts/convert_paper_weights.py --only tworooms
 ```
 
-See [`TRAINING.md`](TRAINING.md) for the full setup matrix, Docker workflow, and `devtools.py` reference.
+See [`TRAINING.md`](TRAINING.md) for the full setup matrix, Docker workflow, and `scripts/devtools.py` reference.
 
 ## Stage 2 — hierarchical training (H-LeWM)
 

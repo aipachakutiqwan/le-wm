@@ -31,10 +31,10 @@ uploading from local (Modal datacenter pulls at ~500 MB/s vs your local upload s
 
 ```bash
 # tworoom only (12 GB, ~1 min)
-./devtools.py download_modal tworoom
+./scripts/devtools.py download_modal tworoom
 
 # multiple datasets
-./devtools.py download_modal tworoom pusht
+./scripts/devtools.py download_modal tworoom pusht
 
 # or via modal run directly (no tag needed — uses lightweight image)
 modal run cloud/modal_train.py::download --envs tworoom
@@ -73,14 +73,14 @@ modal secret list
 
 ```bash
 # Dry-run — 10 batches, 1 epoch, no W&B (~2 min, quick sanity check)
-./devtools.py run_modal <tag> --dry-run
+./scripts/devtools.py run_modal <tag> --dry-run
 
 # Full training run
-./devtools.py run_modal <tag> \
+./scripts/devtools.py run_modal <tag> \
   --overrides="[loader.batch_size=192,loader.prefetch_factor=2,wandb.enabled=True,wandb.config.entity='addyj-stanford-university',wandb.config.project='le-wm-test']"
 
 # Different dataset
-./devtools.py run_modal <tag> --data pusht
+./scripts/devtools.py run_modal <tag> --data pusht
 ```
 
 ### Via modal run directly
@@ -99,11 +99,11 @@ LEWM_TAG=<tag> modal run cloud/modal_train.py \
   --overrides "loader.batch_size=192,loader.prefetch_factor=2,wandb.enabled=True"
 ```
 
-`devtools.py run_modal` sets `LEWM_TAG` automatically — prefer that for day-to-day use.
+`scripts/devtools.py run_modal` sets `LEWM_TAG` automatically — prefer that for day-to-day use.
 
 Get the current tag with:
 ```bash
-./devtools.py _git_tag
+./scripts/devtools.py _git_tag
 ```
 
 ---
@@ -122,7 +122,7 @@ modal volume put lewm-data baseline/tworoom/lewm_epoch_9_object.ckpt lewm_epoch_
 **For paper weights** (`weights.pt` from HuggingFace), convert first:
 ```bash
 # converts weights.pt + config.json → baseline_paper/tworooms/lewm_paper_object.ckpt
-python convert_paper_weights.py --only tworooms
+python scripts/convert_paper_weights.py --only tworooms
 
 # then upload the converted checkpoint
 modal volume put lewm-data baseline_paper/tworooms/lewm_paper_object.ckpt lewm_paper_object.ckpt
@@ -134,16 +134,16 @@ After upload, the checkpoint is at `/stablewm-home/lewm_paper_object.ckpt` insid
 
 ```bash
 # evaluate the paper weights (after convert + upload above)
-./devtools.py eval_modal <tag> --policy /stablewm-home/lewm_paper
+./scripts/devtools.py eval_modal <tag> --policy /stablewm-home/lewm_paper
 
 # evaluate a trained checkpoint
-./devtools.py eval_modal <tag> --policy /stablewm-home/lewm_epoch_9
+./scripts/devtools.py eval_modal <tag> --policy /stablewm-home/lewm_epoch_9
 
 # evaluate a checkpoint from a training run
-./devtools.py eval_modal <tag> --policy /stablewm-home/<run_id>
+./scripts/devtools.py eval_modal <tag> --policy /stablewm-home/<run_id>
 
 # with overrides
-./devtools.py eval_modal <tag> \
+./scripts/devtools.py eval_modal <tag> \
   --policy /stablewm-home/lewm_epoch_9 \
   --overrides "eval.num_eval=10,plan_config.horizon=5"
 ```
@@ -201,8 +201,8 @@ If you've changed the Dockerfile or dependencies, rebuild and push to GHCR first
 then pass the new tag to `run_modal`:
 
 ```bash
-./devtools.py build_docker --push
-./devtools.py run_modal <new-tag>
+./scripts/devtools.py build_docker --push
+./scripts/devtools.py run_modal <new-tag>
 ```
 
 ---

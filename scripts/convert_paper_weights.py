@@ -27,7 +27,7 @@ from pathlib import Path
 
 import torch
 
-REPO_ROOT = Path(__file__).parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from jepa import JEPA  # noqa: E402

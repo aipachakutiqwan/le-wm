@@ -49,7 +49,7 @@ from huggingface_hub import hf_hub_download  # noqa: E402
 # Config
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = Path(__file__).parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DEST_ROOT = REPO_ROOT / "baseline_paper"
 
 MODEL_REPOS: dict[str, str] = {
